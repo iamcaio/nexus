@@ -1,0 +1,66 @@
+# ===========================================================================
+#  NEXUS — normalizacao de fim de linha
+# ===========================================================================
+#  Por que este arquivo existe:
+#
+#  O Git for Windows vem com core.autocrlf=true. Isso faz o git converter
+#  LF -> CRLF ao gravar no disco e CRLF -> LF ao gravar no repositorio. O aviso
+#  "LF will be replaced by CRLF the next time Git touches it" e ele anunciando
+#  essa conversao. Nao e erro, e nada quebra.
+#
+#  O problema de deixar assim: o comportamento passa a depender da configuracao
+#  de CADA maquina. Se voce clonar noutro computador com autocrlf=false, os
+#  arquivos vem diferentes, e um dia aparece um commit que "mudou 5264 linhas"
+#  sem ninguem ter editado nada. Isso torna o historico inutil para revisao.
+#
+#  Com este arquivo, a regra passa a viver NO REPOSITORIO e vale para todos.
+# ===========================================================================
+
+# Padrao: o git decide o que e texto e normaliza para LF no repositorio.
+# No disco, cada sistema recebe o que e nativo dele.
+* text=auto
+
+# ---------------------------------------------------------------- codigo
+*.py     text diff=python
+*.js     text
+*.json   text
+*.md     text
+*.txt    text
+*.spec   text
+*.yml    text
+*.yaml   text
+
+# ------------------------------------------------- especificos do Windows
+# Estes PRECISAM de CRLF no disco. O PowerShell tolera LF, mas .bat e .cmd
+# executados com LF puro dao erro silencioso em alguns comandos do Windows.
+*.ps1    text eol=crlf
+*.psm1   text eol=crlf
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+
+# Inno Setup: o compilador aceita os dois, mas o editor oficial (Inno Setup
+# Compiler IDE) reescreve em CRLF ao salvar. Fixar aqui evita que abrir o
+# arquivo no editor gere um diff falso de arquivo inteiro.
+*.iss    text eol=crlf
+
+# ---------------------------------------------------------------- binarios
+# Marcar explicitamente evita que o git tente "consertar" fim de linha dentro
+# de um arquivo binario, o que o corromperia. O git costuma detectar sozinho,
+# mas detectar nao e garantir.
+*.ico    binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.pdf    binary
+*.exe    binary
+*.dll    binary
+*.zip    binary
+*.xlsx   binary
+*.docx   binary
+
+# ------------------------------------------------------ fora do pacote
+# Arquivos que nao precisam ir num `git archive` / download do source code.
+.gitattributes  export-ignore
+.gitignore      export-ignore
+build_tools/    export-ignore

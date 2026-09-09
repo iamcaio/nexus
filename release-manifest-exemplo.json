@@ -1,0 +1,9 @@
+{
+  "version": "6.0.1",
+  "kind": "installer",
+  "url": "https://github.com/SEU-USUARIO/nexus/releases/download/v6.0.1/NEXUS-Setup-6.0.1.exe",
+  "sha256": "cole-aqui-o-hash-de-64-caracteres-que-o-build-ps1-imprimiu",
+  "size": 42500000,
+  "notes": "- Corrigido X\n- Adicionado Y",
+  "mandatory": false
+}

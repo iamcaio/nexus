@@ -1,0 +1,63 @@
+# ===========================================================================
+#  NEXUS — .gitignore
+# ===========================================================================
+#  ATENCAO: a pasta de CODIGO e a pasta de DADOS do app sao a mesma (C:\NEXUS).
+#  O app grava em C:\NEXUS\db, que fica dentro deste diretorio. Sem este
+#  arquivo, um `git add .` sobe:
+#
+#    db/cloud_session.json  -> refreshToken do Firebase (CREDENCIAL)
+#    db/users/<uid>/        -> as tarefas e notas de cada conta
+#    db/tasks_db.json       -> o seu banco pessoal
+#
+#  Um refreshToken do Firebase e trocavel por idToken valido indefinidamente.
+#  Publicar esse arquivo entrega acesso de leitura E escrita a conta dele.
+# ===========================================================================
+
+# ---- DADOS DO APLICATIVO. Nunca versionar. ----
+db/
+*.db
+tasks_db.json
+tasks_db.json.bak
+cloud_session.json
+cloud_config.json
+avatar.dat
+.migrado_de_donext
+
+# ---- Artefatos de build. Regeraveis, e pesam 58 MB. ----
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+*.spec.bak
+
+# ---- Instaladores. Vao para o GitHub RELEASES, nao para o repositorio. ----
+# O Releases foi feito para binarios; o repositorio, nao. Subir .exe no
+# repo estoura o limite de 100 MB por arquivo depois de algumas versoes e
+# infla o historico para sempre (git nao esquece blobs).
+dist_installer/
+*.exe
+*.msi
+
+# ---- DOSSIE DE SEGURANCA. Descreve falhas ja corrigidas e limites em
+#      aberto. Num repositorio publico isso e atalho para atacar instalacoes
+#      que ainda nao foram atualizadas. Mantenha fora do repo. ----
+SEGURANCA.md
+SECURITY-PRIVATE.md
+auditoria*.md
+
+# ---- Dependencias de teste. O NEXUS nao precisa de Node para rodar;
+#      o jsdom serve so para build_tools\testar_sanitizador.js. ----
+node_modules/
+package-lock.json
+package.json
+
+# ---- Ambientes virtuais e ferramentas ----
+.venv/
+venv/
+env/
+.idea/
+.vscode/
+*.log
+Thumbs.db
+desktop.ini

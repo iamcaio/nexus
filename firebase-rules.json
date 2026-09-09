@@ -1,0 +1,40 @@
+{
+  "rules": {
+    "database": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+
+    "apps": {
+      "nexus": {
+        "_release": {
+          ".read": true
+        },
+        "users": {
+          "$uid": {
+            ".read": "auth != null && auth.uid == $uid",
+            ".write": "auth != null && auth.uid == $uid"
+          }
+        }
+      },
+
+      "donext": {
+        "users": {
+          "$uid": {
+            ".read": "auth != null && auth.uid == $uid",
+            ".write": false
+          }
+        }
+      },
+
+      "cogni": {
+        "users": {
+          "$uid": {
+            ".read": "auth != null && auth.uid == $uid",
+            ".write": "auth != null && auth.uid == $uid"
+          }
+        }
+      }
+    }
+  }
+}
