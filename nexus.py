@@ -38,30 +38,38 @@ class WindowsNotifier:
     def notify(title, message, sound=True):
         def _run():
             try:
-                clean_title = str(title or "NEXUS").replace('"', '`"').replace('$', '`$')
-                clean_msg = str(message or "").replace('"', '`"').replace('$', '`$')
+                clean_title = str(title or "NEXUS").replace('"', '`"').replace('$', '`$').replace("'", "`'")
+                clean_msg = str(message or "").replace('"', '`"').replace('$', '`$').replace("'", "`'")
                 audio_tag = '<audio src="ms-winsoundevent:Notification.Default" />' if sound else '<audio silent="true" />'
                 
                 ps_script = f'''
-                [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-                [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
-                
-                $template = @"
-                <toast>
-                    <visual>
-                        <binding template="ToastGeneric">
-                            <text>{clean_title}</text>
-                            <text>{clean_msg}</text>
-                        </binding>
-                    </visual>
-                    {audio_tag}
-                </toast>
+                try {{
+                    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+                    [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+                    
+                    $template = @"
+                    <toast>
+                        <visual>
+                            <binding template="ToastGeneric">
+                                <text>{clean_title}</text>
+                                <text>{clean_msg}</text>
+                            </binding>
+                        </visual>
+                        {audio_tag}
+                    </toast>
 "@
-                $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-                $xml.LoadXml($template)
-                $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-                $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("NEXUS")
-                $notifier.Show($toast)
+                    $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+                    $xml.LoadXml($template)
+                    $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+                    
+                    try {{
+                        $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("NEXUS")
+                        $notifier.Show($toast)
+                    }} catch {{
+                        $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\\WindowsPowerShell\\v1.0\\powershell.exe")
+                        $notifier.Show($toast)
+                    }}
+                }} catch {{ }}
                 '''
                 subprocess.run(
                     ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
@@ -2053,7 +2061,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         <div class="flex items-center gap-1.5">
             <!-- Botão de Notificações / Sino de Vencimentos -->
             <div class="relative">
-                <button id="notifBellBtn" onclick="toggleNotificationPanel()" class="notion-btn px-2.5 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5 cursor-pointer relative" title="Central de Notificações de Prazos">
+                <button id="notifBellBtn" onclick="toggleNotificationPanel(event)" class="notion-btn px-2.5 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5 cursor-pointer relative select-none" title="Central de Notificações de Prazos">
                     <i id="notifBellIcon" class="fa-regular fa-bell text-xs"></i>
                     <span class="hidden sm:inline">Prazos</span>
                     <span id="notifBadgeCount" class="hidden absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-rose-600 text-white font-bold text-[9px] rounded-full border border-[#202020] shadow-sm">0</span>
@@ -2689,7 +2697,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             </div>
         </div>
     <!-- PAINEL / CENTRAL DE NOTIFICAÇÕES DE PRAZOS -->
-    <div id="notificationPanel" class="fixed top-14 right-4 w-96 max-w-[calc(100vw-2rem)] bg-[#202020] border border-[#333333] shadow-2xl rounded-lg z-50 hidden flex-col overflow-hidden animate-fadeIn">
+    <div id="notificationPanel" style="display:none;" onclick="event.stopPropagation()" class="fixed top-14 right-4 w-96 max-w-[calc(100vw-2rem)] bg-[#202020] border border-[#333333] shadow-2xl rounded-lg z-[9999] flex-col overflow-hidden animate-fadeIn">
         <div class="p-3 border-b border-[#2f2f2f] flex items-center justify-between bg-[#1b1b1b]">
             <div class="flex items-center gap-2">
                 <i class="fa-solid fa-bell text-sky-400 text-xs"></i>
@@ -2700,7 +2708,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <button onclick="testarNotificacaoWindows()" title="Testar Notificação Windows" class="text-[10px] text-gray-400 hover:text-sky-300 px-1.5 py-0.5 rounded hover:bg-white/5 cursor-pointer">
                     <i class="fa-solid fa-volume-high mr-1"></i>Testar
                 </button>
-                <button onclick="toggleNotificationPanel(false)" class="text-gray-400 hover:text-white text-xs p-1 cursor-pointer">
+                <button onclick="toggleNotificationPanel(event, false)" class="text-gray-400 hover:text-white text-xs p-1 cursor-pointer">
                     <i class="fa-solid fa-xmark"></i>
                 </button>
             </div>
@@ -5067,23 +5075,28 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             `;
         }
 
-        function toggleNotificationPanel(forceState) {
+        function toggleNotificationPanel(event, forceState) {
+            if (event && event.stopPropagation) {
+                event.stopPropagation();
+            }
             const panel = document.getElementById('notificationPanel');
             if (!panel) return;
-            const isHidden = panel.classList.contains('hidden');
-            const shouldShow = forceState !== undefined ? forceState : isHidden;
+            
+            const isVisible = panel.style.display === 'flex' || (!panel.classList.contains('hidden') && panel.style.display !== 'none');
+            const shouldShow = forceState !== undefined ? forceState : !isVisible;
+            
             if (shouldShow) {
                 checkDeadlinesAndNotify(false);
                 panel.classList.remove('hidden');
-                panel.classList.add('flex');
+                panel.style.display = 'flex';
             } else {
                 panel.classList.add('hidden');
-                panel.classList.remove('flex');
+                panel.style.display = 'none';
             }
         }
 
         function openTaskFromNotif(taskId) {
-            toggleNotificationPanel(false);
+            toggleNotificationPanel(null, false);
             if (appMode !== 'tasks') {
                 switchAppMode('tasks');
             }
@@ -5099,11 +5112,11 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         function testarNotificacaoWindows() {
             if (window.pywebview && window.pywebview.api && typeof window.pywebview.api.send_desktop_notification === 'function') {
                 window.pywebview.api.send_desktop_notification(
-                    "NEXUS - Teste de Notificação",
-                    "As notificações do Windows estão funcionando com sucesso no NEXUS!",
+                    "NEXUS - Notificações Push Ativas",
+                    "As notificações do Windows estão configuradas e funcionando com sucesso no NEXUS!",
                     true
                 );
-                showToast("Notificação enviada ao Windows!");
+                showToast("Notificação de teste enviada ao Windows!");
             } else {
                 showToast("Ponte com o sistema operacional não conectada.");
             }
@@ -5112,10 +5125,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         document.addEventListener('click', (e) => {
             const panel = document.getElementById('notificationPanel');
             const btn = document.getElementById('notifBellBtn');
-            if (panel && !panel.classList.contains('hidden')) {
-                if (!panel.contains(e.target) && !btn.contains(e.target)) {
+            if (panel && (panel.style.display === 'flex' || !panel.classList.contains('hidden'))) {
+                if (!panel.contains(e.target) && (!btn || !btn.contains(e.target))) {
                     panel.classList.add('hidden');
-                    panel.classList.remove('flex');
+                    panel.style.display = 'none';
                 }
             }
         });
@@ -5155,9 +5168,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
             if (e.key === 'Escape') {
                 const notifPanel = document.getElementById('notificationPanel');
-                if (notifPanel && !notifPanel.classList.contains('hidden')) {
+                if (notifPanel && (notifPanel.style.display === 'flex' || !notifPanel.classList.contains('hidden'))) {
                     e.preventDefault();
-                    toggleNotificationPanel(false);
+                    toggleNotificationPanel(null, false);
                     return;
                 }
                 const modal = modalAbertoNoTopo();
