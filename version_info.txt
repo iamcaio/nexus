@@ -3,8 +3,8 @@
 # (porque e) software legitimo em vez de um binario anonimo.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(6, 1, 0, 0),
-    prodvers=(6, 1, 0, 0),
+    filevers=(6, 2, 0, 0),
+    prodvers=(6, 2, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
       StringTable('040904B0', [
         StringStruct('CompanyName', 'NEXUS'),
         StringStruct('FileDescription', 'NEXUS - Gestao de tarefas e projetos'),
-        StringStruct('FileVersion', '6.1.0.0'),
+        StringStruct('FileVersion', '6.2.0.0'),
         StringStruct('InternalName', 'NEXUS'),
         StringStruct('LegalCopyright', 'Copyright (c) 2026'),
         StringStruct('OriginalFilename', 'NEXUS.exe'),
         StringStruct('ProductName', 'NEXUS'),
-        StringStruct('ProductVersion', '6.1.0.0')
+        StringStruct('ProductVersion', '6.2.0.0')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])

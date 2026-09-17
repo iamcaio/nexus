@@ -47,7 +47,7 @@ SECURITY-PRIVATE.md
 auditoria*.md
 
 # ---- Dependencias de teste. O NEXUS nao precisa de Node para rodar;
-#      o jsdom serve so para build_tools\testar_sanitizador.js. ----
+#      o jsdom serve so para build_tools\sanitizador_teste_completo_NODE.js. ----
 node_modules/
 package-lock.json
 package.json

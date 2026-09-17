@@ -245,7 +245,7 @@ function Invoke-Regex {
     <#
       Aplica um -replace exigindo exatamente uma ocorrencia. Se o padrao nao
       casar, para o build. Um regex que silenciosamente nao casa produz um
-      release com versoes discordantes — o bug de release classico.
+      release com versoes discordantes - o bug de release classico.
     #>
     param(
         [Parameter(Mandatory)][string]$Texto,
@@ -325,7 +325,7 @@ if ($OnlyInstaller) {
 
     # Guarda-corpo: o exe reaproveitado precisa ser DESTA versao. Empacotar um
     # binario antigo dentro de um instalador novo produz um release em que o
-    # app diz uma versao e o instalador diz outra — e o auto-updater entra em
+    # app diz uma versao e o instalador diz outra - e o auto-updater entra em
     # loop, oferecendo a mesma atualizacao para sempre.
     $verExe = (Get-Item "dist\NEXUS\NEXUS.exe").VersionInfo.FileVersion
     if ($verExe -and ($verExe -replace '[,\s]', '.') -notlike "$Version*") {

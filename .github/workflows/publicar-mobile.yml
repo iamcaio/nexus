@@ -1,0 +1,108 @@
+# ===========================================================================
+#  Publica o NEXUS Mobile no GitHub Pages
+# ===========================================================================
+#  Dispara em todo push para main que altere algo em mobile/.
+#  Publica SOMENTE a pasta mobile/, entao a URL final e limpa:
+#
+#      https://iamcaio.github.io/nexus/
+#
+#  Nao publica nexus.py, build.ps1 nem o resto do codigo do desktop. Eles ja
+#  sao publicos no repositorio, mas nao ha motivo para tambem serem servidos
+#  como site.
+#
+#  ATIVACAO (uma vez so):
+#    GitHub -> Settings -> Pages -> Source: "GitHub Actions"
+# ===========================================================================
+
+name: publicar-mobile
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/publicar-mobile.yml'
+  # Permite disparar na mao pela aba Actions
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Se voce fizer dois pushes seguidos, cancela o deploy antigo em vez de
+# enfileirar - o ultimo e o que vale.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Se a compatibilidade entre desktop e mobile quebrar, o deploy PARA.
+      # Publicar um mobile que apaga o Vault seria pior do que nao publicar.
+      - name: Verificar compatibilidade desktop/mobile
+        run: python build_tools/verificar_mobile.py
+
+      - name: Conferir que os icones existem
+        run: |
+          for f in icon-192.png icon-512.png icon-maskable-512.png; do
+            if [ ! -f "mobile/icons/$f" ]; then
+              echo "::error::mobile/icons/$f nao existe. Rode: python mobile/gerar_icones.py"
+              exit 1
+            fi
+          done
+          echo "os tres icones estao presentes"
+
+      # O erro mais comum de PWA: publicar sem mudar VERSAO_CACHE. O celular
+      # continua servindo os arquivos antigos e parece que o deploy nao
+      # funcionou. Aqui isso vira erro em vez de misterio.
+      - name: Conferir que VERSAO_CACHE mudou
+        run: |
+          ATUAL=$(grep -oP "VERSAO_CACHE = '\K[^']+" mobile/sw.js)
+          echo "VERSAO_CACHE = $ATUAL"
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            ANTERIOR=$(git show HEAD~1:mobile/sw.js 2>/dev/null | grep -oP "VERSAO_CACHE = '\K[^']+" || echo "")
+            MUDOU_APP=$(git diff --name-only HEAD~1 HEAD -- mobile/ | grep -v 'mobile/sw.js' | wc -l)
+            if [ "$MUDOU_APP" -gt 0 ] && [ "$ATUAL" = "$ANTERIOR" ]; then
+              echo "::error::Arquivos de mobile/ mudaram mas VERSAO_CACHE continua '$ATUAL'."
+              echo "::error::Sem trocar isso, o celular servira o cache antigo."
+              exit 1
+            fi
+          fi
+          echo "ok"
+
+  publicar:
+    needs: verificar
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./mobile
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Resumo
+        run: |
+          echo "### NEXUS Mobile publicado" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "URL: ${{ steps.deploy.outputs.page_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "No celular, feche e reabra o app instalado. O service worker" >> $GITHUB_STEP_SUMMARY
+          echo "baixa a versao nova no proximo carregamento." >> $GITHUB_STEP_SUMMARY

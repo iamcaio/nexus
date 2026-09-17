@@ -141,8 +141,8 @@ git status --short
 git check-ignore -v db/cloud_session.json
 git check-ignore -v db/tasks_db.json
 
-# 3. Varredura de credenciais no conteudo dos arquivos
-python build_tools\varrer_segredos.py
+# 3. Verificacao completa (inclui varredura de credenciais)
+python verificar.py
 ```
 
 A terceira é a que o `.gitignore` **não** cobre. Ele impede que a pasta `db/`
@@ -262,16 +262,47 @@ correções entraram no código:
 |---|---|
 | TLS | Verificação de certificado obrigatória. Login e atualização recusam conexão não verificada em vez de degradar. |
 | Abertura de arquivos | 30 extensões executáveis bloqueadas; esquemas de URL perigosos recusados. |
-| Editor de notas | Sanitização de HTML por lista de permissão, em quatro pontos. 28 testes automatizados. |
+| Editor de notas | Sanitização de HTML por lista de permissão, em quatro pontos. |
 | Dependências | CSP adicionada; versões de bibliotecas fixadas. |
 
-Rode as verificações a qualquer momento:
+Rode as verificações a qualquer momento. **Todas usam só Python** — nada a
+instalar:
 
 ```powershell
-node build_tools\testar_sanitizador.js    # 28 testes de XSS
-python build_tools\validar_regras.py      # regras do Firebase
-python build_tools\varrer_segredos.py     # credenciais antes do commit
+python verificar.py
 ```
+
+Isso roda tudo: integridade dos arquivos, política anti-XSS, regras do
+Firebase, varredura de credenciais, estrutura do `build.ps1` e alinhamento das
+três versões. Sai com código 1 se algo estiver errado.
+
+#### O que o `verificar_sanitizador.py` faz — e o que não faz
+
+**Verifica:** se a lista de tags permitidas ganhou um `IFRAME` ou `IMG`, se a
+remoção de atributos `on*` desapareceu, se o parse deixou de usar `<template>`,
+se algum dos quatro pontos de aplicação foi removido. Também extrai a regex de
+validação de URL do próprio código e a executa contra 11 esquemas perigosos e
+6 legítimos.
+
+Validado plantando 10 regressões no `nexus.py`: todas as 10 detectadas, sem
+falso positivo no arquivo íntegro.
+
+**Não verifica:** ele não executa o `sanitizarHtml()` de verdade — isso exige
+um motor de JavaScript e o DOM. Ele audita a política, não a implementação.
+Pega a regressão realista (alguém afrouxa uma regra ao mexer no editor), mas
+não pegaria um erro de lógica que a política não revela.
+
+Para a garantia mais forte existe um teste que roda 28 vetores de XSS contra a
+função real. É **opcional** e exige instalar o Node:
+
+```powershell
+winget install OpenJS.NodeJS.LTS
+# feche e reabra o PowerShell
+npm install jsdom
+node build_tools\sanitizador_teste_completo_NODE.js
+```
+
+O NEXUS não precisa de Node para funcionar nem para compilar.
 
 > O detalhamento das falhas — como eram exploráveis e o que continua em aberto
 > — fica em `SEGURANCA.md`, **fora deste repositório**. Publicar esse detalhe
@@ -434,9 +465,7 @@ Flags úteis:
 ### 4.3 Verifique antes de publicar
 
 ```powershell
-node build_tools\testar_sanitizador.js    # 28 testes de XSS
-python build_tools\validar_regras.py      # regras do Firebase
-python build_tools\checar_buildps1.py     # estrutura do build.ps1
+python verificar.py
 ```
 
 Abra o app e confirme, no painel de atualização, que aparece **"TLS
@@ -471,6 +500,64 @@ Tem de ser idêntico ao `sha256` do manifesto.
 
 ### Passo 3 — Só então, o manifesto no Firebase
 
+#### O nó `_release/stable` não existe? É normal
+
+No Realtime Database **não se cria caminho vazio**. Um nó passa a existir no
+instante em que recebe dado, e desaparece quando o dado é removido. Não há nada
+a corrigir: o caminho nasce quando você grava o manifesto.
+
+Confira o nome exato — é **`_release`**, no singular:
+
+```
+/apps/nexus/_release/stable
+```
+
+#### Só o console consegue escrever aqui
+
+As Regras dão `.read: true` ao `_release` e **nenhum `.write`**. Isso significa
+que ninguém grava nesse nó via API ou REST — nem você, com token válido. Só o
+console do Firebase, que opera acima das Regras.
+
+Foi de propósito. Esse nó decide qual arquivo será baixado e executado na
+máquina dos seus usuários. Se um token pudesse escrever nele, quem roubasse o
+token controlaria o que roda em todas as instalações. Um `curl` a menos vale o
+incômodo.
+
+#### Como criar, pelo console
+
+1. Firebase Console → Realtime Database → aba **Dados**
+2. Expanda `apps` → `nexus`
+3. Passe o mouse em `nexus` e clique no **`+`**
+4. Em *Nome*, digite `_release`
+5. Clique no **`+`** ao lado do campo de valor (isso aninha em vez de gravar
+   um valor solto)
+6. Em *Nome*, digite `stable`
+7. Aninhe outra vez e crie o primeiro campo: nome `version`, valor `6.0.2`
+8. **Adicionar**
+
+Agora o caminho existe. Para preencher o resto de uma vez, sem digitar sete
+campos à mão:
+
+9. Clique em `stable` na árvore para navegar até ele
+10. Menu **⋮** no canto → **Importar JSON**
+11. Escolha `dist_installer\manifest-6.0.2-PARA-COLAR.json`
+
+> **Importar JSON substitui o nó em que você está.** Faça isso somente dentro
+> de `stable`, nunca na raiz nem em `/apps/nexus` — ali ele apagaria
+> `/apps/nexus/users` e `/database`, que é onde estão seus dados e os do Cogni.
+
+#### Confirme que o app consegue ler
+
+Abra no navegador:
+
+```
+https://cogni-data-default-rtdb.firebaseio.com/apps/nexus/_release/stable.json
+```
+
+Tem de devolver o JSON **sem estar logado** — é exatamente assim que o NEXUS lê
+antes de qualquer login. Se vier `null`, o caminho está errado. Se vier
+`Permission denied`, as Regras não foram publicadas.
+
 Console → Realtime Database → `/apps/nexus/_release/stable` → cole o JSON que o
 `build.ps1` imprimiu, com a URL real:
 
@@ -489,6 +576,81 @@ Console → Realtime Database → `/apps/nexus/_release/stable` → cole o JSON 
 ---
 
 ## Parte 6 — O ciclo de atualização
+
+### Um comando
+
+```powershell
+.\release.ps1 -Version 6.1.2 -Notes "- Corrigido X`n- Adicionado Y"
+```
+
+Ele executa, parando em qualquer erro:
+
+1. `build.ps1` — sincroniza a versão nos três arquivos, compila, empacota
+2. `verificar.py` — aborta se qualquer verificação falhar
+3. `git add -A` e commit, com mensagem **lida do `nexus.py`**, não digitada
+4. `git tag -a vX.Y.Z`
+5. `git push` do commit e da tag
+6. Cria o Release e sobe o instalador, se o `gh` estiver instalado
+7. Imprime o manifesto com a URL real
+
+Antes de rodar, veja o que ele faria:
+
+```powershell
+.\release.ps1 -Version 6.1.2 -DryRun
+```
+
+### Por que a mensagem do commit é gerada, não escrita
+
+Uma versão vive em **seis** lugares: `nexus.py`, `version_info.txt`, o `.iss`,
+a mensagem do commit, a tag do git e o manifesto do Firebase.
+
+Mantendo isso à mão, eles divergem. E divergiram neste projeto:
+
+| Commit | Diz | Continha |
+|---|---|---|
+| `4922b6c` | "NEXUS 6.0.2 - correcoes de seguranca" | código **6.1.0** |
+| `49befab` | "NEXUS 6.1.1" | código **6.1.0**, e só renomeava um arquivo |
+
+Nada disso quebra o app. Quebra a sua capacidade de responder *"que código está
+rodando na máquina do usuário?"* — que é a única pergunta que importa quando
+aparece um bug em produção.
+
+O `release.ps1` lê a versão do `nexus.py` **depois** do build e usa esse valor
+na mensagem e na tag. Elas não podem mentir porque não são digitadas.
+
+### As três travas
+
+| Trava | O que impede |
+|---|---|
+| Versão não pode ser menor que a última tag | Publicar 6.0.2 depois de 6.1.1 — quem tem a maior nunca receberia, e seu teste pareceria quebrado |
+| Tag existente aborta | Reaproveitar `v6.1.1` fazendo o Release apontar para código diferente do que ele declara |
+| `verificar.py` falhando aborta | Publicar com byte nulo, XSS afrouxado, credencial vazada ou versões desalinhadas |
+
+### O passo que continua manual
+
+Colar o manifesto no console do Firebase. Isso é deliberado — veja
+[3.3](#33-a-apikey-é-pública--e-o-que-realmente-fazer-a-respeito) e o Passo 3
+da Parte 5. As Regras não dão `.write` ao nó `_release`, então nenhum token
+grava ali, nem o script.
+
+### O que a coluna do GitHub mostra
+
+Na listagem de arquivos do repositório, a coluna do meio **não** é a versão de
+cada arquivo — é a mensagem do último commit que *alterou* aquele arquivo.
+
+Se `nexus.py` mostra "NEXUS 6.0.2" e `build_tools/` mostra "NEXUS 6.1.1", isso
+significa apenas que o commit 6.1.1 não tocou no `nexus.py`. Está correto.
+Arquivos não têm versão em git; **commits** têm.
+
+Forçar todos a mostrar a mesma mensagem exigiria modificar todos os arquivos a
+cada release — o que polui o histórico sem informar nada. A versão do projeto
+se lê na **tag**, não na listagem:
+
+```powershell
+git tag -l                       # todas as versoes publicadas
+git describe --tags              # em que versao voce esta
+git fetch --tags                 # traz tags criadas pela interface do GitHub
+```
 
 Depois da primeira vez, publicar uma versão nova é:
 
@@ -583,6 +745,32 @@ no manifesto.
 
 O script nomeia os processos suspeitos em execução quando falha.
 
+### `The string is missing the terminator: "` num arquivo `.ps1`
+
+O PowerShell aponta uma linha que não tem defeito nenhum. O problema é
+**encoding**, não sintaxe.
+
+O Windows PowerShell 5.1 (`powershell.exe`, o que vem no Windows) lê arquivos
+`.ps1` **sem BOM** como ANSI/Windows-1252, não como UTF-8.
+
+Um travessão `—` (U+2014) em UTF-8 são três bytes: `E2 80 94`. Lidos como
+Windows-1252, viram três caracteres — e o último, `0x94`, é `”` (U+201D), uma
+aspa dupla tipográfica. **O PowerShell aceita aspas tipográficas como
+delimitador de string.**
+
+Resultado: cada caractere acentuado no script vira uma aspa fantasma, o
+pareamento quebra, e o parser morre numa linha aleatória — geralmente a última
+do arquivo.
+
+**A regra deste projeto: arquivos `.ps1` são ASCII puro.** Sem acento, sem
+travessão, sem aspas tipográficas. Funciona em qualquer PowerShell, qualquer
+locale, qualquer editor, sem depender de um byte invisível no início do
+arquivo.
+
+A checagem 0 do `verificar.py` recusa `.ps1` com byte não-ASCII sem BOM. Se
+você editar um script e adicionar um acento, ele avisa antes de você descobrir
+com um erro incompreensível.
+
 ### `ISCC.exe nao encontrado`
 
 O Inno Setup 6 não está instalado. O `.exe` **já foi gerado** — teste com
@@ -636,7 +824,8 @@ As Regras não foram publicadas, ou foram publicadas erradas. Rode
 | `nexus.spec` | Config do PyInstaller. Inclui `certifi`. |
 | `version_info.txt` | Metadados do exe. Reduz falso-positivo de antivírus. |
 | `nexus_installer.iss` | Script do instalador. |
-| `build.ps1` | Gera tudo com um comando. |
+| `build.ps1` | Compila: versão, exe, instalador, hash, manifesto. |
+| `release.ps1` | **Publica: build, verifica, commita, tag, push, release.** |
 | `firebase-rules.json` | Regras do Realtime Database. |
 | `.gitignore` | **Impede o vazamento do `db/`. Não edite.** |
 | `.gitattributes` | Fim de linha determinístico entre máquinas. |
@@ -644,4 +833,6 @@ As Regras não foram publicadas, ou foram publicadas erradas. Rode
 | `build_tools\varrer_segredos.py` | **Procura credenciais antes do commit.** |
 | `build_tools\validar_regras.py` | Valida gramática e segurança das regras. |
 | `build_tools\checar_buildps1.py` | Checagem estrutural do `build.ps1`. |
-| `build_tools\testar_sanitizador.js` | 28 testes de XSS no editor de notas. |
+| `verificar.py` | **Roda todas as verificações de uma vez.** |
+| `build_tools\verificar_sanitizador.py` | Audita a política anti-XSS do editor. |
+| `build_tools\sanitizador_teste_completo_NODE.js` | Teste completo (28 vetores). Exige Node + jsdom. |

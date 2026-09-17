@@ -4,7 +4,7 @@
  *  Uso:
  *      cd C:\Dev\nexus            (ou onde estiver o nexus.py)
  *      npm install jsdom          (uma vez so)
- *      node build_tools\testar_sanitizador.js
+ *      node build_tools\sanitizador_teste_completo_NODE.js
  *
  *  O script extrai as funcoes de sanitizacao direto do nexus.py e roda 28
  *  casos contra elas: 18 vetores de XSS que precisam ser bloqueados e 10

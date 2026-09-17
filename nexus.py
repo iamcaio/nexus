@@ -27,7 +27,225 @@ except Exception as e:
     show_native_error_dialog("Erro ao Iniciar - NEXUS", err_msg)
     sys.exit(1)
 
-APP_VERSION = "v6.1.0"
+APP_VERSION = "v6.2.0"
+
+# ---------------------------------------------------------------------------
+# NOTIFICAÇÕES DESKTOP E ÍCONE NA BARRA DE TAREFAS (WINDOWS)
+# ---------------------------------------------------------------------------
+class WindowsNotifier:
+    """Dispara notificações nativas do Windows (Toast Notifications) em segundo plano."""
+    @staticmethod
+    def notify(title, message, sound=True):
+        def _run():
+            try:
+                clean_title = str(title or "NEXUS").replace('"', '`"').replace('$', '`$')
+                clean_msg = str(message or "").replace('"', '`"').replace('$', '`$')
+                audio_tag = '<audio src="ms-winsoundevent:Notification.Default" />' if sound else '<audio silent="true" />'
+                
+                ps_script = f'''
+                [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+                [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+                
+                $template = @"
+                <toast>
+                    <visual>
+                        <binding template="ToastGeneric">
+                            <text>{clean_title}</text>
+                            <text>{clean_msg}</text>
+                        </binding>
+                    </visual>
+                    {audio_tag}
+                </toast>
+"@
+                $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+                $xml.LoadXml($template)
+                $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+                $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("NEXUS")
+                $notifier.Show($toast)
+                '''
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+                    capture_output=True, text=True, timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                )
+            except Exception as e:
+                print(f"[Notifier] Erro ao disparar notificação: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+
+class TaskbarOverlayHelper:
+    """Gerencia o ícone de sobreposição (badge) no ícone da Barra de Tarefas do Windows."""
+    _helper_cls = None
+    _init_attempted = False
+
+    @classmethod
+    def _init_helper(cls):
+        if cls._init_attempted:
+            return cls._helper_cls
+        cls._init_attempted = True
+        try:
+            import clr
+            from System.CodeDom.Compiler import CodeDomProvider, CompilerParameters
+            
+            csharp_code = """
+            using System;
+            using System.Runtime.InteropServices;
+            using System.Drawing;
+
+            public static class TaskbarBadge {
+                [ComImport]
+                [Guid("ea1afb91-9e28-4b86-90e9-9e9f8a5eefaf")]
+                [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+                private interface ITaskbarList3 {
+                    void HrInit();
+                    void AddTab(IntPtr hwnd);
+                    void DeleteTab(IntPtr hwnd);
+                    void ActivateTab(IntPtr hwnd);
+                    void SetActiveAlt(IntPtr hwnd);
+                    void MarkFullscreenWindow(IntPtr hwnd, int fFullscreen);
+                    void SetProgressValue(IntPtr hwnd, ulong ullCompleted, ulong ullTotal);
+                    void SetProgressState(IntPtr hwnd, int tbpFlags);
+                    void RegisterTab(IntPtr hwndTab, IntPtr hwndMDI);
+                    void UnregisterTab(IntPtr hwndTab);
+                    void SetTabOrder(IntPtr hwndTab, IntPtr hwndInsertBefore);
+                    void SetTabActive(IntPtr hwndTab, IntPtr hwndMDI, uint dwReserved);
+                    void ThumbBarAddButtons(IntPtr hwnd, uint cButtons, IntPtr pButton);
+                    void ThumbBarUpdateButtons(IntPtr hwnd, uint cButtons, IntPtr pButton);
+                    void ThumbBarSetImageList(IntPtr hwnd, IntPtr himl);
+                    void SetOverlayIcon(IntPtr hwnd, IntPtr hIcon, [MarshalAs(UnmanagedType.LPWStr)] string pszDescription);
+                    void SetThumbnailTooltip(IntPtr hwnd, [MarshalAs(UnmanagedType.LPWStr)] string pszTip);
+                    void SetThumbnailClip(IntPtr hwnd, IntPtr prcClip);
+                }
+
+                [ComImport]
+                [Guid("56fdf344-fd6d-11d0-958a-006097c9a090")]
+                [ClassInterface(ClassInterfaceType.None)]
+                private class TaskbarList { }
+
+                private static ITaskbarList3 _taskbar;
+
+                static TaskbarBadge() {
+                    try {
+                        _taskbar = (ITaskbarList3)new TaskbarList();
+                        _taskbar.HrInit();
+                    } catch { }
+                }
+
+                [DllImport("user32.dll", CharSet = CharSet.Auto)]
+                private static extern bool DestroyIcon(IntPtr handle);
+
+                public static void SetBadge(IntPtr hwnd, string text, string desc) {
+                    if (_taskbar == null || hwnd == IntPtr.Zero) return;
+                    try {
+                        if (string.IsNullOrEmpty(text)) {
+                            _taskbar.SetOverlayIcon(hwnd, IntPtr.Zero, null);
+                            return;
+                        }
+
+                        using (Bitmap bmp = new Bitmap(32, 32)) {
+                            using (Graphics g = Graphics.FromImage(bmp)) {
+                                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                                using (Brush bgBrush = new SolidBrush(Color.FromArgb(220, 38, 38))) {
+                                    g.FillEllipse(bgBrush, 1, 1, 30, 30);
+                                }
+                                using (Pen borderPen = new Pen(Color.White, 2.0f)) {
+                                    g.DrawEllipse(borderPen, 1, 1, 30, 30);
+                                }
+
+                                float fontSize = text.Length > 2 ? 10f : (text.Length > 1 ? 12f : 14f);
+                                using (Font f = new Font("Arial", fontSize, FontStyle.Bold))
+                                using (Brush textBrush = new SolidBrush(Color.White)) {
+                                    StringFormat sf = new StringFormat();
+                                    sf.Alignment = StringAlignment.Center;
+                                    sf.LineAlignment = StringAlignment.Center;
+                                    g.DrawString(text, f, textBrush, new RectangleF(0, 0, 32, 32), sf);
+                                }
+                            }
+
+                            IntPtr hIcon = bmp.GetHicon();
+                            try {
+                                _taskbar.SetOverlayIcon(hwnd, hIcon, desc ?? "NEXUS");
+                            } finally {
+                                DestroyIcon(hIcon);
+                            }
+                        }
+                    } catch { }
+                }
+
+                public static void Clear(IntPtr hwnd) {
+                    if (_taskbar == null || hwnd == IntPtr.Zero) return;
+                    try {
+                        _taskbar.SetOverlayIcon(hwnd, IntPtr.Zero, null);
+                    } catch { }
+                }
+            }
+            """
+            provider = CodeDomProvider.CreateProvider("CSharp")
+            params = CompilerParameters()
+            params.GenerateInMemory = True
+            params.ReferencedAssemblies.Add("System.dll")
+            params.ReferencedAssemblies.Add("System.Drawing.dll")
+            params.ReferencedAssemblies.Add("System.Windows.Forms.dll")
+            results = provider.CompileAssemblyFromSource(params, csharp_code)
+            if not results.Errors.HasErrors:
+                cls._helper_cls = results.CompiledAssembly.GetType("TaskbarBadge")
+        except Exception as e:
+            print(f"[TaskbarOverlay] Aviso: suporte a overlay não carregou: {e}")
+        return cls._helper_cls
+
+    @classmethod
+    def find_main_hwnd(cls, window=None):
+        try:
+            if window and hasattr(window, "native") and window.native:
+                if hasattr(window.native, "Handle"):
+                    return int(window.native.Handle.ToInt64())
+        except Exception:
+            pass
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            current_pid = os.getpid()
+            found = []
+
+            WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            def enum_cb(hwnd, lparam):
+                if user32.IsWindowVisible(hwnd):
+                    pid = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    if pid.value == current_pid:
+                        found.append(hwnd)
+                return True
+
+            user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
+            if found:
+                return found[0]
+        except Exception:
+            pass
+        return 0
+
+    @classmethod
+    def set_overlay(cls, count, description="", window=None):
+        try:
+            helper = cls._init_helper()
+            if not helper:
+                return
+            hwnd_val = cls.find_main_hwnd(window)
+            if not hwnd_val:
+                return
+            from System import IntPtr
+            hwnd_ptr = IntPtr(hwnd_val)
+            if count is None or count <= 0:
+                helper.GetMethod("Clear").Invoke(None, [hwnd_ptr])
+            else:
+                text = "99+" if count > 99 else str(count)
+                desc = description or f"NEXUS - {count} tarefa(s) próxima(s) da data limite"
+                helper.GetMethod("SetBadge").Invoke(None, [hwnd_ptr, text, desc])
+        except Exception as e:
+            print(f"[TaskbarOverlay] Erro ao aplicar overlay: {e}")
 
 # ---------------------------------------------------------------------------
 # CAMADA DE NUVEM (Firebase Realtime Database + Firebase Authentication)
@@ -1122,6 +1340,26 @@ class NexusDesktopAPI:
         return APP_VERSION
 
     # ------------------------------------------------------------------ #
+    # Notificações e Taskbar Badge (Windows)
+    # ------------------------------------------------------------------ #
+    def send_desktop_notification(self, title, message, sound=True):
+        """Envia uma notificação Toast nativa no Windows para alertar sobre prazos."""
+        try:
+            WindowsNotifier.notify(title, message, sound=bool(sound))
+            return {"status": "success"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def update_taskbar_badge(self, count, description=""):
+        """Atualiza ou remove o badge numérico no ícone do NEXUS na barra de tarefas do Windows."""
+        try:
+            win = self._window or (webview.windows[0] if webview.windows else None)
+            TaskbarOverlayHelper.set_overlay(count, description, window=win)
+            return {"status": "success"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    # ------------------------------------------------------------------ #
     # Atualizacao automatica (expostos ao JS)
     # ------------------------------------------------------------------ #
     def _checar_update_em_background(self):
@@ -1796,7 +2034,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <img src="data:image/png;base64,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" alt="NEXUS" class="w-full h-full object-contain">
             </div>
             <span class="font-bold text-sm tracking-wide text-white">NEXUS</span>
-            <button id="app-version-badge" onclick="abrirUpdateModal()" title="Ver atualizacoes" class="text-[10px] text-[#8a8a8e] font-mono px-1.5 py-0.5 rounded bg-white/5 border border-white/5 hover:text-white hover:border-white/20 transition cursor-pointer">v6.1.0</button>
+            <button id="app-version-badge" onclick="abrirUpdateModal()" title="Ver atualizacoes" class="text-[10px] text-[#8a8a8e] font-mono px-1.5 py-0.5 rounded bg-white/5 border border-white/5 hover:text-white hover:border-white/20 transition cursor-pointer">v6.2.0</button>
             <button id="updateDot" onclick="abrirUpdateModal()" title="Nova versao disponivel" class="hidden items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#2eaadc]/20 border border-[#2eaadc]/40 text-sky-200 cursor-pointer animate-pulse">
                 <i class="fa-solid fa-arrow-up text-[8px]"></i><span id="updateDotLabel">novo</span>
             </button>
@@ -1813,6 +2051,15 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         </div>
 
         <div class="flex items-center gap-1.5">
+            <!-- Botão de Notificações / Sino de Vencimentos -->
+            <div class="relative">
+                <button id="notifBellBtn" onclick="toggleNotificationPanel()" class="notion-btn px-2.5 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5 cursor-pointer relative" title="Central de Notificações de Prazos">
+                    <i id="notifBellIcon" class="fa-regular fa-bell text-xs"></i>
+                    <span class="hidden sm:inline">Prazos</span>
+                    <span id="notifBadgeCount" class="hidden absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-rose-600 text-white font-bold text-[9px] rounded-full border border-[#202020] shadow-sm">0</span>
+                </button>
+            </div>
+
             <button onclick="executeDiskSave(true)" class="notion-btn px-2.5 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5 cursor-pointer" title="Salvar no Disco">
                 <i class="fa-regular fa-floppy-disk text-xs"></i> <span>Salvar</span>
             </button>
@@ -2441,6 +2688,30 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <p id="updDiag" class="text-[9px] text-gray-700 font-mono leading-relaxed break-all"></p>
             </div>
         </div>
+    <!-- PAINEL / CENTRAL DE NOTIFICAÇÕES DE PRAZOS -->
+    <div id="notificationPanel" class="fixed top-14 right-4 w-96 max-w-[calc(100vw-2rem)] bg-[#202020] border border-[#333333] shadow-2xl rounded-lg z-50 hidden flex-col overflow-hidden animate-fadeIn">
+        <div class="p-3 border-b border-[#2f2f2f] flex items-center justify-between bg-[#1b1b1b]">
+            <div class="flex items-center gap-2">
+                <i class="fa-solid fa-bell text-sky-400 text-xs"></i>
+                <span class="font-bold text-xs text-white">Tarefas & Prazos</span>
+                <span id="notifTotalBadge" class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-gray-300">0 alertas</span>
+            </div>
+            <div class="flex items-center gap-1.5">
+                <button onclick="testarNotificacaoWindows()" title="Testar Notificação Windows" class="text-[10px] text-gray-400 hover:text-sky-300 px-1.5 py-0.5 rounded hover:bg-white/5 cursor-pointer">
+                    <i class="fa-solid fa-volume-high mr-1"></i>Testar
+                </button>
+                <button onclick="toggleNotificationPanel(false)" class="text-gray-400 hover:text-white text-xs p-1 cursor-pointer">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+        </div>
+        <div id="notificationList" class="p-2 overflow-y-auto max-h-[380px] space-y-2 text-xs">
+            <!-- Itens de notificação renderizados dinamicamente via JS -->
+        </div>
+        <div class="p-2 border-t border-[#2f2f2f] bg-[#1a1a1a] flex items-center justify-between text-[11px] text-gray-400">
+            <span class="flex items-center gap-1"><i class="fa-brands fa-windows text-sky-400 text-xs"></i> Notificações Desktop Ativas</span>
+            <button onclick="checkDeadlinesAndNotify(true)" class="text-sky-400 hover:underline cursor-pointer">Atualizar</button>
+        </div>
     </div>
 
     <div id="toastContainer" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
@@ -2829,10 +3100,21 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 else if (nuvem.state === 'push_failed' || nuvem.state === 'error')
                     showToast('Sem conexão com a nuvem — salvo apenas nesta máquina.');
             }
+
+            // Monitor de prazos e atualizacao do icone da barra de tarefas
+            try { checkDeadlinesAndNotify(false); } catch (e) { console.warn("Erro ao checar prazos:", e); }
         }
 
         window.addEventListener('pywebviewready', initNativeApp);
-        document.addEventListener('DOMContentLoaded', () => { setTimeout(initNativeApp, 100); });
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(initNativeApp, 100);
+            // Checagem periodica a cada 5 minutos
+            setInterval(() => {
+                if (isLoadedFromDisk && !dbBlocked) {
+                    checkDeadlinesAndNotify(false);
+                }
+            }, 5 * 60 * 1000);
+        });
 
         function saveState(showVisualIndicator = true, immediate = false) {
             if (dbBlocked) {
@@ -2868,6 +3150,8 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                             } else if (showVisualIndicator) {
                                 showAutoSaveUI();
                             }
+                            // Reavalia prazos e taskbar overlay
+                            try { checkDeadlinesAndNotify(false); } catch (e) { }
                         } else {
                             const detalhe = (res && res.message) ? res.message : 'motivo desconhecido';
                             console.error("Falha ao gravar:", detalhe);
@@ -2917,6 +3201,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             } else {
                 renderNotepadTree();
             }
+            try { checkDeadlinesAndNotify(false); } catch (e) { }
         }
 
         /* O avatar não vive mais dentro de state (nem do tasks_db.json).
@@ -4550,6 +4835,292 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         }
 
         /* ==================================================================
+           CENTRAL DE NOTIFICAÇÕES & MONITORAMENTO DE PRAZOS (DEADLINE ENGINE)
+           ================================================================== */
+        let notifiedTaskIds = new Set();
+        let lastNotifCheckDate = null;
+
+        function getTodayDateStr() {
+            const d = new Date();
+            const year = d.getFullYear();
+            const month = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        }
+
+        function calculateDaysDiff(dateStr1, dateStr2) {
+            try {
+                const [y1, m1, d1] = dateStr1.split('-').map(Number);
+                const [y2, m2, d2] = dateStr2.split('-').map(Number);
+                const dt1 = new Date(y1, m1 - 1, d1);
+                const dt2 = new Date(y2, m2 - 1, d2);
+                const diffTime = dt1.getTime() - dt2.getTime();
+                return Math.round(diffTime / (1000 * 60 * 60 * 24));
+            } catch (e) {
+                return 0;
+            }
+        }
+
+        function getDeadlineStatus(t, todayStr) {
+            if (!t.dueDate) return null;
+            const diff = calculateDaysDiff(t.dueDate, todayStr);
+            if (diff < 0) {
+                return { type: 'overdue', diff: Math.abs(diff), label: `Atrasada (${Math.abs(diff)}d)` };
+            } else if (diff === 0) {
+                return { type: 'today', diff: 0, label: 'Vence Hoje' };
+            } else if (diff === 1) {
+                return { type: 'tomorrow', diff: 1, label: 'Vence Amanhã' };
+            } else if (diff <= 3) {
+                return { type: 'soon', diff: diff, label: `Vence em ${diff}d` };
+            }
+            return null;
+        }
+
+        function checkDeadlinesAndNotify(forceNotify = false) {
+            if (!state || !Array.isArray(state.tasks)) return;
+
+            const today = getTodayDateStr();
+            if (lastNotifCheckDate && lastNotifCheckDate !== today) {
+                notifiedTaskIds.clear();
+            }
+            lastNotifCheckDate = today;
+
+            const pendingTasks = state.tasks.filter(t => (Number(t.progress) || 0) < 100 && !t.completed);
+            
+            const overdueTasks = [];
+            const todayTasks = [];
+            const soonTasks = [];
+
+            pendingTasks.forEach(t => {
+                const status = getDeadlineStatus(t, today);
+                if (!status) return;
+                const item = { task: t, status };
+                if (status.type === 'overdue') overdueTasks.push(item);
+                else if (status.type === 'today') todayTasks.push(item);
+                else soonTasks.push(item);
+            });
+
+            overdueTasks.sort((a, b) => a.task.dueDate.localeCompare(b.task.dueDate));
+            todayTasks.sort((a, b) => (b.task.priority === 'Urgente' ? 1 : 0) - (a.task.priority === 'Urgente' ? 1 : 0));
+            soonTasks.sort((a, b) => a.task.dueDate.localeCompare(b.task.dueDate));
+
+            const totalCritical = overdueTasks.length + todayTasks.length;
+            const totalAlerts = totalCritical + soonTasks.length;
+
+            // 1. Atualizar Badge no Header (Sino)
+            const badgeCount = document.getElementById('notifBadgeCount');
+            const bellIcon = document.getElementById('notifBellIcon');
+            const totalBadge = document.getElementById('notifTotalBadge');
+            
+            if (badgeCount) {
+                if (totalAlerts > 0) {
+                    badgeCount.innerText = totalAlerts > 99 ? '99+' : totalAlerts;
+                    badgeCount.classList.remove('hidden');
+                    if (totalCritical > 0) {
+                        badgeCount.className = "absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-rose-600 text-white font-bold text-[9px] rounded-full border border-[#202020] shadow-sm animate-pulse";
+                        if (bellIcon) bellIcon.className = "fa-solid fa-bell text-rose-400 text-xs";
+                    } else {
+                        badgeCount.className = "absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-amber-500 text-white font-bold text-[9px] rounded-full border border-[#202020] shadow-sm";
+                        if (bellIcon) bellIcon.className = "fa-solid fa-bell text-amber-400 text-xs";
+                    }
+                } else {
+                    badgeCount.classList.add('hidden');
+                    if (bellIcon) bellIcon.className = "fa-regular fa-bell text-gray-400 text-xs";
+                }
+            }
+
+            if (totalBadge) {
+                totalBadge.innerText = `${totalAlerts} alerta(s)`;
+            }
+
+            // 2. Renderizar lista dentro do painel
+            renderNotificationPanelContent(overdueTasks, todayTasks, soonTasks);
+
+            // 3. Atualizar Badge na Barra de Tarefas do Windows
+            if (window.pywebview && window.pywebview.api && typeof window.pywebview.api.update_taskbar_badge === 'function') {
+                try {
+                    const desc = totalCritical > 0
+                        ? `NEXUS - ${totalCritical} tarefa(s) com prazo crítico!`
+                        : (totalAlerts > 0 ? `NEXUS - ${totalAlerts} tarefa(s) próximas` : "");
+                    window.pywebview.api.update_taskbar_badge(totalCritical > 0 ? totalCritical : (totalAlerts > 0 ? totalAlerts : 0), desc);
+                } catch (e) {
+                    console.error("Erro ao atualizar taskbar badge:", e);
+                }
+            }
+
+            // 4. Disparar Notificação Desktop do Windows (Toast)
+            if (window.pywebview && window.pywebview.api && typeof window.pywebview.api.send_desktop_notification === 'function') {
+                const tasksToNotify = [];
+                
+                todayTasks.forEach(item => {
+                    if (forceNotify || !notifiedTaskIds.has(item.task.id)) {
+                        tasksToNotify.push({ task: item.task, type: 'today', label: 'Vence Hoje' });
+                        notifiedTaskIds.add(item.task.id);
+                    }
+                });
+
+                overdueTasks.slice(0, 2).forEach(item => {
+                    if (forceNotify || !notifiedTaskIds.has(item.task.id)) {
+                        tasksToNotify.push({ task: item.task, type: 'overdue', label: `Atrasada (${item.status.label})` });
+                        notifiedTaskIds.add(item.task.id);
+                    }
+                });
+
+                if (tasksToNotify.length > 0) {
+                    if (tasksToNotify.length === 1) {
+                        const t = tasksToNotify[0].task;
+                        const titulo = tasksToNotify[0].type === 'today' 
+                            ? `NEXUS: Tarefa Vencendo Hoje!` 
+                            : `NEXUS: Tarefa Atrasada!`;
+                        const mensagem = `${t.title}\nData Limite: ${formatDateBR(t.dueDate)} | Prioridade: ${t.priority || 'Normal'}`;
+                        window.pywebview.api.send_desktop_notification(titulo, mensagem, true);
+                    } else {
+                        const titulo = `NEXUS: ${tasksToNotify.length} tarefas com prazo hoje ou atrasadas`;
+                        const resumo = tasksToNotify.map(n => `• ${n.task.title} (${n.label})`).slice(0, 3).join('\n');
+                        window.pywebview.api.send_desktop_notification(titulo, resumo, true);
+                    }
+                }
+            }
+        }
+
+        function renderNotificationPanelContent(overdueTasks, todayTasks, soonTasks) {
+            const listContainer = document.getElementById('notificationList');
+            if (!listContainer) return;
+
+            const total = overdueTasks.length + todayTasks.length + soonTasks.length;
+            if (total === 0) {
+                listContainer.innerHTML = `
+                    <div class="py-8 text-center flex flex-col items-center justify-center text-gray-500">
+                        <i class="fa-regular fa-circle-check text-2xl text-emerald-400/60 mb-2"></i>
+                        <p class="font-medium text-gray-300">Tudo em dia!</p>
+                        <p class="text-[11px] text-gray-500 mt-0.5">Nenhuma tarefa atrasada ou com prazo próximo.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            let html = '';
+
+            if (overdueTasks.length > 0) {
+                html += `
+                    <div class="mb-2">
+                        <div class="text-[10px] font-bold text-rose-400 uppercase tracking-wider px-1 mb-1 flex items-center gap-1.5">
+                            <i class="fa-solid fa-triangle-exclamation"></i> Atrasadas (${overdueTasks.length})
+                        </div>
+                        <div class="space-y-1.5">
+                            ${overdueTasks.map(item => createNotifItemHTML(item.task, 'border-rose-500/30 bg-rose-950/20 text-rose-300', item.status.label, 'text-rose-400')).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            if (todayTasks.length > 0) {
+                html += `
+                    <div class="mb-2">
+                        <div class="text-[10px] font-bold text-amber-400 uppercase tracking-wider px-1 mb-1 flex items-center gap-1.5">
+                            <i class="fa-solid fa-clock"></i> Vencem Hoje (${todayTasks.length})
+                        </div>
+                        <div class="space-y-1.5">
+                            ${todayTasks.map(item => createNotifItemHTML(item.task, 'border-amber-500/30 bg-amber-950/20 text-amber-300', item.status.label, 'text-amber-400')).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            if (soonTasks.length > 0) {
+                html += `
+                    <div class="mb-1">
+                        <div class="text-[10px] font-bold text-sky-400 uppercase tracking-wider px-1 mb-1 flex items-center gap-1.5">
+                            <i class="fa-regular fa-calendar-days"></i> Próximos Dias (${soonTasks.length})
+                        </div>
+                        <div class="space-y-1.5">
+                            ${soonTasks.map(item => createNotifItemHTML(item.task, 'border-sky-500/20 bg-sky-950/10 text-sky-300', item.status.label, 'text-sky-400')).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            listContainer.innerHTML = html;
+        }
+
+        function createNotifItemHTML(task, badgeClass, statusLabel, iconColor) {
+            const cat = state.categories.find(c => c.id === task.categoryId);
+            const proj = state.projects.find(p => p.id === task.projectId);
+            const contextText = [cat ? cat.name : null, proj ? proj.name : null].filter(Boolean).join(' • ');
+
+            return `
+                <div class="p-2 rounded bg-white/5 hover:bg-white/10 border border-white/5 transition flex items-start justify-between gap-2 group cursor-pointer" onclick="openTaskFromNotif('${task.id}')">
+                    <div class="flex items-start gap-2 min-w-0 flex-1">
+                        <button onclick="event.stopPropagation(); quickCompleteFromNotif('${task.id}')" class="mt-0.5 w-4 h-4 rounded-full border border-gray-600 hover:border-emerald-400 hover:bg-emerald-500/20 flex items-center justify-center transition cursor-pointer flex-shrink-0" title="Concluir tarefa agora">
+                            <i class="fa-solid fa-check text-[8px] text-transparent group-hover:text-emerald-300"></i>
+                        </button>
+                        <div class="min-w-0 flex-1">
+                            <div class="text-xs text-gray-200 font-medium truncate group-hover:text-white" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</div>
+                            <div class="flex items-center gap-2 mt-1">
+                                <span class="text-[9px] font-semibold px-1.5 py-0.2 rounded border ${badgeClass} whitespace-nowrap">${statusLabel}</span>
+                                ${contextText ? `<span class="text-[10px] text-gray-500 truncate max-w-[150px]">${escapeHtml(contextText)}</span>` : ''}
+                            </div>
+                        </div>
+                    </div>
+                    <i class="fa-solid fa-arrow-right text-[10px] text-gray-600 group-hover:text-sky-400 mt-1 flex-shrink-0 transition"></i>
+                </div>
+            `;
+        }
+
+        function toggleNotificationPanel(forceState) {
+            const panel = document.getElementById('notificationPanel');
+            if (!panel) return;
+            const isHidden = panel.classList.contains('hidden');
+            const shouldShow = forceState !== undefined ? forceState : isHidden;
+            if (shouldShow) {
+                checkDeadlinesAndNotify(false);
+                panel.classList.remove('hidden');
+                panel.classList.add('flex');
+            } else {
+                panel.classList.add('hidden');
+                panel.classList.remove('flex');
+            }
+        }
+
+        function openTaskFromNotif(taskId) {
+            toggleNotificationPanel(false);
+            if (appMode !== 'tasks') {
+                switchAppMode('tasks');
+            }
+            openTaskDetailDrawer(taskId);
+        }
+
+        function quickCompleteFromNotif(taskId) {
+            toggleTaskCompletion(taskId);
+            checkDeadlinesAndNotify(false);
+            showToast("Tarefa concluída!");
+        }
+
+        function testarNotificacaoWindows() {
+            if (window.pywebview && window.pywebview.api && typeof window.pywebview.api.send_desktop_notification === 'function') {
+                window.pywebview.api.send_desktop_notification(
+                    "NEXUS - Teste de Notificação",
+                    "As notificações do Windows estão funcionando com sucesso no NEXUS!",
+                    true
+                );
+                showToast("Notificação enviada ao Windows!");
+            } else {
+                showToast("Ponte com o sistema operacional não conectada.");
+            }
+        }
+
+        document.addEventListener('click', (e) => {
+            const panel = document.getElementById('notificationPanel');
+            const btn = document.getElementById('notifBellBtn');
+            if (panel && !panel.classList.contains('hidden')) {
+                if (!panel.contains(e.target) && !btn.contains(e.target)) {
+                    panel.classList.add('hidden');
+                    panel.classList.remove('flex');
+                }
+            }
+        });
+
+        /* ==================================================================
            TECLADO: Enter confirma, Esc cancela
            ------------------------------------------------------------------
            Um único handler global cobre todas as telas de criação/edição, em
@@ -4583,6 +5154,12 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             const alvo = e.target;
 
             if (e.key === 'Escape') {
+                const notifPanel = document.getElementById('notificationPanel');
+                if (notifPanel && !notifPanel.classList.contains('hidden')) {
+                    e.preventDefault();
+                    toggleNotificationPanel(false);
+                    return;
+                }
                 const modal = modalAbertoNoTopo();
                 if (modal) { e.preventDefault(); modal.cancelar(); return; }
                 if (selectedTaskId) { e.preventDefault(); closeTaskDetailDrawer(); }
