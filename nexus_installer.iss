@@ -66,8 +66,20 @@ Name: "desktopicon"; Description: "Criar atalho na Area de Trabalho"; GroupDescr
 Source: "dist\NEXUS\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}";  Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+; AppUserModelID: E ESTA LINHA que faz as notificacoes aparecerem assinadas
+; "NEXUS", com o icone do app, em vez de "Windows PowerShell".
+;
+; O Windows so entrega um toast se o AUMID informado corresponder a um app
+; instalado. Para app nao-empacotado, "instalado" significa exatamente isto:
+; um atalho no MENU INICIAR carregando a propriedade System.AppUserModel.ID.
+; O atalho da Area de Trabalho nao serve para esse fim - por isso o AUMID vai
+; nos dois, mas o que conta e o de {autoprograms}.
+;
+; Precisa ser IDENTICO a constante APP_AUMID do nexus.py. Trocar um sem o
+; outro faz as notificacoes voltarem a aparecer como PowerShell, sem erro
+; nenhum no log.
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; AppUserModelID: "iamcaio.NEXUS"
+Name: "{autodesktop}\{#MyAppName}";  Filename: "{app}\{#MyAppExeName}"; AppUserModelID: "iamcaio.NEXUS"; Tasks: desktopicon
 
 [Run]
 ; skipifsilent: num update automatico o app e reaberto pelo RestartApplications,

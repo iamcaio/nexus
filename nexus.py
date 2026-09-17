@@ -32,6 +32,44 @@ APP_VERSION = "v6.2.0"
 # ---------------------------------------------------------------------------
 # NOTIFICAÇÕES DESKTOP E ÍCONE NA BARRA DE TAREFAS (WINDOWS)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# IDENTIDADE DO APP PARA O WINDOWS (AppUserModelID)
+# ---------------------------------------------------------------------------
+# O Windows so entrega um toast se o AppUserModelID (AUMID) informado
+# corresponder a um app instalado - o que, para app nao-empacotado, significa
+# um atalho no Menu Iniciar com a propriedade System.AppUserModel.ID.
+#
+# Sem isso, CreateToastNotifier("NEXUS") LEVANTA excecao, o codigo cai no
+# fallback e usa o AUMID do proprio PowerShell. A notificacao aparece, mas
+# assinada como "Windows PowerShell", com o icone do PowerShell - nao do NEXUS.
+#
+# Tres pecas precisam concordar, e as tres usam esta constante:
+#   1. Este processo declara o AUMID no boot (SetCurrentProcessExplicitAppUserModelID)
+#   2. O instalador grava o AUMID no atalho do Menu Iniciar (nexus_installer.iss)
+#   3. O PowerShell do toast usa o mesmo AUMID
+#
+# Trocar este valor sem trocar no .iss quebra as notificacoes de forma
+# silenciosa: elas voltam a aparecer como PowerShell.
+# ---------------------------------------------------------------------------
+APP_AUMID = "iamcaio.NEXUS"
+
+
+def _registrar_identidade_windows():
+    """
+    Declara o AUMID deste processo. Precisa rodar ANTES de criar a janela.
+
+    Efeito colateral desejado: a janela do NEXUS passa a ser agrupada na barra
+    de tarefas sob a identidade do app, e nao sob "python.exe".
+    """
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_AUMID)
+        return True
+    except Exception as e:
+        print(f"[NEXUS] Nao foi possivel registrar o AppUserModelID: {e}")
+        return False
+
+
 class WindowsNotifier:
     """Dispara notificações nativas do Windows (Toast Notifications) em segundo plano."""
     @staticmethod
@@ -63,9 +101,18 @@ class WindowsNotifier:
                     $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
                     
                     try {{
-                        $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("NEXUS")
+                        # AUMID do NEXUS. Funciona porque o instalador grava
+                        # System.AppUserModel.ID no atalho do Menu Iniciar.
+                        # Resultado: o toast aparece assinado "NEXUS", com o
+                        # icone do app.
+                        $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("{APP_AUMID}")
                         $notifier.Show($toast)
                     }} catch {{
+                        # Fallback: roda em versao portatil ou em execucao a
+                        # partir do codigo, quando nao existe o atalho. A
+                        # notificacao SAI, mas assinada como Windows
+                        # PowerShell. Nao e o comportamento desejado - e o
+                        # comportamento aceitavel para nao perder o aviso.
                         $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\\WindowsPowerShell\\v1.0\\powershell.exe")
                         $notifier.Show($toast)
                     }}
@@ -2060,13 +2107,11 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
         <div class="flex items-center gap-1.5">
             <!-- Botão de Notificações / Sino de Vencimentos -->
-            <div class="relative">
-                <button id="notifBellBtn" onclick="toggleNotificationPanel(event)" class="notion-btn px-2.5 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5 cursor-pointer relative select-none" title="Central de Notificações de Prazos">
-                    <i id="notifBellIcon" class="fa-regular fa-bell text-xs"></i>
-                    <span class="hidden sm:inline">Prazos</span>
-                    <span id="notifBadgeCount" class="hidden absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-rose-600 text-white font-bold text-[9px] rounded-full border border-[#202020] shadow-sm">0</span>
-                </button>
-            </div>
+            <button id="notifBellBtn" onclick="abrirNotificacoesModal()" class="notion-btn px-2.5 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5 cursor-pointer relative" title="Central de Notificações de Prazos">
+                <i id="notifBellIcon" class="fa-regular fa-bell text-xs"></i>
+                <span class="hidden sm:inline">Prazos</span>
+                <span id="notifBadgeCount" class="hidden absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-rose-600 text-white font-bold text-[9px] rounded-full border border-[#202020] shadow-sm">0</span>
+            </button>
 
             <button onclick="executeDiskSave(true)" class="notion-btn px-2.5 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5 cursor-pointer" title="Salvar no Disco">
                 <i class="fa-regular fa-floppy-disk text-xs"></i> <span>Salvar</span>
@@ -2696,29 +2741,42 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <p id="updDiag" class="text-[9px] text-gray-700 font-mono leading-relaxed break-all"></p>
             </div>
         </div>
-    <!-- PAINEL / CENTRAL DE NOTIFICAÇÕES DE PRAZOS -->
-    <div id="notificationPanel" style="display:none;" onclick="event.stopPropagation()" class="fixed top-14 right-4 w-96 max-w-[calc(100vw-2rem)] bg-[#202020] border border-[#333333] shadow-2xl rounded-lg z-[9999] flex-col overflow-hidden animate-fadeIn">
-        <div class="p-3 border-b border-[#2f2f2f] flex items-center justify-between bg-[#1b1b1b]">
-            <div class="flex items-center gap-2">
-                <i class="fa-solid fa-bell text-sky-400 text-xs"></i>
-                <span class="font-bold text-xs text-white">Tarefas & Prazos</span>
-                <span id="notifTotalBadge" class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-gray-300">0 alertas</span>
+    </div>
+
+    <!-- ================= CENTRAL DE NOTIFICAÇÕES E PRAZOS ================= -->
+    <div id="notifModal" class="fixed inset-0 bg-black/70 z-[60] hidden items-center justify-center p-4">
+        <div class="bg-[#202020] border border-[#2f2f2f] rounded w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
+            <div class="p-4 border-b border-[#2f2f2f] flex items-center justify-between bg-[#1e1e1e]">
+                <div class="flex items-center gap-2.5">
+                    <div class="w-8 h-8 rounded bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-[#2eaadc] flex-shrink-0">
+                        <i class="fa-solid fa-bell text-sm"></i>
+                    </div>
+                    <div>
+                        <div class="text-sm font-bold text-white flex items-center gap-2">
+                            Tarefas & Prazos
+                            <span id="notifTotalBadge" class="text-[10px] font-mono font-normal px-2 py-0.5 rounded bg-white/10 text-gray-300">0 alertas</span>
+                        </div>
+                        <div class="text-[11px] text-gray-400">Monitoramento de tarefas com data limite</div>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button onclick="testarNotificacaoWindows()" title="Testar notificação no Windows" class="text-xs text-sky-400 hover:text-white px-2.5 py-1 rounded bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/20 cursor-pointer flex items-center gap-1.5 transition">
+                        <i class="fa-solid fa-volume-high text-[10px]"></i> <span>Testar Som</span>
+                    </button>
+                    <button onclick="fecharNotificacoesModal()" class="text-gray-500 hover:text-white cursor-pointer p-1.5"><i class="fa-solid fa-xmark text-sm"></i></button>
+                </div>
             </div>
-            <div class="flex items-center gap-1.5">
-                <button onclick="testarNotificacaoWindows()" title="Testar Notificação Windows" class="text-[10px] text-gray-400 hover:text-sky-300 px-1.5 py-0.5 rounded hover:bg-white/5 cursor-pointer">
-                    <i class="fa-solid fa-volume-high mr-1"></i>Testar
-                </button>
-                <button onclick="toggleNotificationPanel(event, false)" class="text-gray-400 hover:text-white text-xs p-1 cursor-pointer">
-                    <i class="fa-solid fa-xmark"></i>
+
+            <div id="notificationList" class="p-4 overflow-y-auto flex-1 space-y-3 text-xs">
+                <!-- Itens renderizados dinamicamente via JS -->
+            </div>
+
+            <div class="p-3 border-t border-[#2f2f2f] bg-[#1a1a1a] flex items-center justify-between text-xs text-gray-400">
+                <span class="flex items-center gap-1.5 text-[11px]"><i class="fa-brands fa-windows text-sky-400"></i> Notificações Desktop Ativas</span>
+                <button onclick="checkDeadlinesAndNotify(true)" class="text-xs text-sky-400 hover:text-sky-300 hover:underline cursor-pointer flex items-center gap-1">
+                    <i class="fa-solid fa-rotate-right text-[10px]"></i> Atualizar agora
                 </button>
             </div>
-        </div>
-        <div id="notificationList" class="p-2 overflow-y-auto max-h-[380px] space-y-2 text-xs">
-            <!-- Itens de notificação renderizados dinamicamente via JS -->
-        </div>
-        <div class="p-2 border-t border-[#2f2f2f] bg-[#1a1a1a] flex items-center justify-between text-[11px] text-gray-400">
-            <span class="flex items-center gap-1"><i class="fa-brands fa-windows text-sky-400 text-xs"></i> Notificações Desktop Ativas</span>
-            <button onclick="checkDeadlinesAndNotify(true)" class="text-sky-400 hover:underline cursor-pointer">Atualizar</button>
         </div>
     </div>
 
@@ -5075,28 +5133,23 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             `;
         }
 
-        function toggleNotificationPanel(event, forceState) {
-            if (event && event.stopPropagation) {
-                event.stopPropagation();
-            }
-            const panel = document.getElementById('notificationPanel');
-            if (!panel) return;
-            
-            const isVisible = panel.style.display === 'flex' || (!panel.classList.contains('hidden') && panel.style.display !== 'none');
-            const shouldShow = forceState !== undefined ? forceState : !isVisible;
-            
-            if (shouldShow) {
-                checkDeadlinesAndNotify(false);
-                panel.classList.remove('hidden');
-                panel.style.display = 'flex';
-            } else {
-                panel.classList.add('hidden');
-                panel.style.display = 'none';
-            }
+        function abrirNotificacoesModal() {
+            checkDeadlinesAndNotify(false);
+            const m = document.getElementById('notifModal');
+            if (!m) return;
+            m.classList.remove('hidden');
+            m.classList.add('flex');
+        }
+
+        function fecharNotificacoesModal() {
+            const m = document.getElementById('notifModal');
+            if (!m) return;
+            m.classList.add('hidden');
+            m.classList.remove('flex');
         }
 
         function openTaskFromNotif(taskId) {
-            toggleNotificationPanel(null, false);
+            fecharNotificacoesModal();
             if (appMode !== 'tasks') {
                 switchAppMode('tasks');
             }
@@ -5122,17 +5175,6 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             }
         }
 
-        document.addEventListener('click', (e) => {
-            const panel = document.getElementById('notificationPanel');
-            const btn = document.getElementById('notifBellBtn');
-            if (panel && (panel.style.display === 'flex' || !panel.classList.contains('hidden'))) {
-                if (!panel.contains(e.target) && (!btn || !btn.contains(e.target))) {
-                    panel.classList.add('hidden');
-                    panel.style.display = 'none';
-                }
-            }
-        });
-
         /* ==================================================================
            TECLADO: Enter confirma, Esc cancela
            ------------------------------------------------------------------
@@ -5145,6 +5187,8 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             { id: 'projectModal',  confirmar: () => saveProjectModal(),  cancelar: () => closeProjectModal()  },
             { id: 'profileModal',  confirmar: () => saveProfile(),       cancelar: () => closeProfileModal()  },
             { id: 'noteIconModal', confirmar: null,                      cancelar: () => closeNoteIconModal() },
+            { id: 'updateModal',   confirmar: null,                      cancelar: () => fecharUpdateModal()  },
+            { id: 'notifModal',    confirmar: null,                      cancelar: () => fecharNotificacoesModal() },
         ];
 
         function modalAbertoNoTopo() {
@@ -5835,6 +5879,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
 def main():
     try:
+        # ANTES de criar a janela: sem isso o Windows trata o processo como
+        # "python.exe" e recusa o AUMID do NEXUS nas notificacoes.
+        _registrar_identidade_windows()
+
         api = NexusDesktopAPI()
         window = webview.create_window(
             title='NEXUS',

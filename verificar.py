@@ -56,6 +56,19 @@ def cabecalho(txt):
     print("=" * 74)
 
 
+def ok(msg):
+    print("  OK     " + msg)
+
+
+def falha(msg):
+    print("  FALHA  " + msg)
+    falhas.append(msg)
+
+
+def aviso(msg):
+    print("  aviso  " + msg)
+
+
 def checar_integridade_dos_arquivos():
     """
     Checagem 0: os arquivos de texto do projeto sao carregaveis?
@@ -178,6 +191,85 @@ def rodar_verificadores():
             falhas.append("%s: codigo %d" % (script, r.returncode))
 
 
+def checar_notificacoes():
+    """
+    As notificacoes dependem de TRES lugares concordarem sobre o AUMID.
+
+    Se eles divergirem, nada da erro: o toast simplesmente volta a aparecer
+    assinado "Windows PowerShell", com o icone do PowerShell. E uma falha
+    silenciosa e visualmente sutil - exatamente o tipo que passa batido.
+    """
+    import re
+    cabecalho("6. NOTIFICACOES DO WINDOWS (AppUserModelID)")
+
+    try:
+        py = io.open(os.path.join(RAIZ, 'nexus.py'), encoding='utf-8').read()
+        iss = io.open(os.path.join(RAIZ, 'nexus_installer.iss'),
+                      encoding='utf-8').read()
+    except OSError as e:
+        aviso("nao foi possivel ler os arquivos: %s" % e)
+        return
+
+    m = re.search(r'APP_AUMID = "([^"]+)"', py)
+    if not m:
+        falha("APP_AUMID nao definido no nexus.py")
+        return
+    aumid = m.group(1)
+    print("  AUMID: %s" % aumid)
+
+    # Exige a CHAMADA completa, com a constante. Procurar so o nome da API
+    # casaria com a mencao dela no comentario explicativo logo acima - e o
+    # verificador aprovaria um arquivo onde a chamada real foi removida.
+    if re.search(r'shell32\.SetCurrentProcessExplicitAppUserModelID\(\s*APP_AUMID\s*\)', py):
+        ok("processo declara o AUMID")
+    else:
+        falha("AUSENTE: a chamada shell32.SetCurrentProcessExplicitAppUserModelID(APP_AUMID)")
+
+    # `_registrar_identidade_windows\(\)` tambem casa com a linha do `def`,
+    # porque 'def _registrar_identidade_windows():' contem '...()'. Sem exigir
+    # a chamada dentro do main(), o verificador aprovaria um main() que nunca
+    # registra o AUMID - e as notificacoes voltariam a sair como PowerShell.
+    m_main = re.search(r'def main\(\):(.*?)(?=\nif __name__)', py, re.S)
+    if m_main and re.search(r'^\s+_registrar_identidade_windows\(\)',
+                            m_main.group(1), re.M):
+        ok("registro chamado dentro do main()")
+    else:
+        falha("o main() nao chama _registrar_identidade_windows() - o AUMID "
+              "nunca seria declarado e o toast sairia como PowerShell")
+
+    if re.search(r'CreateToastNotifier\("\{APP_AUMID\}"\)', py):
+        ok("o toast usa a constante, nao um literal solto")
+    else:
+        falha("o PowerShell do toast nao usa {APP_AUMID}")
+
+    nos_atalhos = re.findall(r'AppUserModelID: "([^"]+)"', iss)
+    if not nos_atalhos:
+        falha("nenhum atalho do .iss tem AppUserModelID - sem isso o Windows "
+              "recusa o AUMID e o toast sai como PowerShell")
+    elif set(nos_atalhos) != {aumid}:
+        falha("AUMID divergente: nexus.py=%r  .iss=%s" % (aumid, set(nos_atalhos)))
+    else:
+        ok("%d atalho(s) do instalador com o mesmo AUMID" % len(nos_atalhos))
+
+    # o atalho do Menu Iniciar e o que conta; o da Area de Trabalho nao serve
+    if re.search(r'\{autoprograms\}[^\n]*AppUserModelID', iss):
+        ok("o atalho do Menu Iniciar carrega o AUMID (e o que o Windows exige)")
+    else:
+        falha("o atalho de {autoprograms} nao tem AppUserModelID - so o do "
+              "Menu Iniciar registra o app para notificacoes")
+
+    for padrao, desc in [
+        (r'class WindowsNotifier', "classe WindowsNotifier"),
+        (r'def send_desktop_notification', "metodo exposto ao JS"),
+        (r'def update_taskbar_badge', "badge da barra de tarefas"),
+        (r'notifiedTaskIds', "deduplicacao: nao repete a mesma tarefa"),
+    ]:
+        if re.search(padrao, py):
+            ok(desc)
+        else:
+            falha("AUSENTE: " + desc)
+
+
 def checar_versoes_alinhadas():
     """As tres versoes tem de ser a mesma, senao o release sai inconsistente."""
     cabecalho("5. VERSOES ALINHADAS")
@@ -220,6 +312,7 @@ def main():
 
     checar_integridade_dos_arquivos()
     rodar_verificadores()
+    checar_notificacoes()
     checar_versoes_alinhadas()
 
     print()
