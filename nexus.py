@@ -11,6 +11,7 @@ import threading
 import subprocess
 import tempfile
 import shutil
+import pathlib
 
 def show_native_error_dialog(title, message):
     """Exibe um alerta nativo do sistema com o erro exato caso ocorra uma falha ao abrir."""
@@ -27,7 +28,7 @@ except Exception as e:
     show_native_error_dialog("Erro ao Iniciar - NEXUS", err_msg)
     sys.exit(1)
 
-APP_VERSION = "v6.2.0"
+APP_VERSION = "v6.3.6"
 
 # ---------------------------------------------------------------------------
 # NOTIFICAÇÕES DESKTOP E ÍCONE NA BARRA DE TAREFAS (WINDOWS)
@@ -1760,7 +1761,12 @@ class NexusDesktopAPI:
             if not win:
                 return {"status": "error", "message": "Janela não inicializada."}
             
-            file_types = ('CSV Files (*.csv)', 'All Files (*.*)') if file_format == "csv" else ('Excel Files (*.xlsx)', 'All Files (*.*)')
+            if file_format == "json":
+                file_types = ('Backup NEXUS (*.json)', 'All Files (*.*)')
+            elif file_format == "csv":
+                file_types = ('CSV Files (*.csv)', 'All Files (*.*)')
+            else:
+                file_types = ('Excel Files (*.xlsx)', 'All Files (*.*)')
             result = win.create_file_dialog(
                 webview.SAVE_DIALOG,
                 save_filename=default_name,
@@ -1845,6 +1851,55 @@ class NexusDesktopAPI:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+# ---------------------------------------------------------------------------
+# INTERFACE LOCAL (sem CDN)
+# ---------------------------------------------------------------------------
+# Antes a interface dependia de CDNs a cada abertura: o Tailwind chegava como
+# um COMPILADOR que rodava no navegador (sempre pela rede, nunca um arquivo
+# fixo), alem de Font Awesome e fontes. Sem internet, a tela abria sem estilo
+# nenhum. Agora tudo vai dentro de vendor\\ (empacotado pelo nexus.spec) e o
+# Tailwind e um CSS estatico pre-compilado.
+#
+# A nuvem (login, dados, atualizacao) continua igual: abrir a interface sem
+# internet nao significa sincronizar sem internet.
+# ---------------------------------------------------------------------------
+UI_LOCAL_PATH = r"C:\NEXUS\ui"
+
+
+def _recursos_dir():
+    """Pasta dos arquivos empacotados pelo PyInstaller (vendor). Em modo
+    desenvolvimento cai na pasta do proprio script."""
+    base = getattr(sys, '_MEIPASS', None)
+    if base:
+        return base
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _vendor_dir_uri():
+    """URI file:// absoluta da pasta vendor, sem barra no final."""
+    return pathlib.Path(os.path.join(_recursos_dir(), 'vendor')).as_uri()
+
+
+def _escrever_ui_local(nome_arquivo, html_str):
+    """Grava o HTML em disco e devolve a URI file:// dele. Precisa ser um
+    arquivo de verdade: so assim os caminhos file:// de vendor resolvem do
+    jeito que o navegador espera. Reescrito a cada boot, para uma atualizacao
+    do .exe nunca deixar um index.html velho para tras."""
+    html_final = html_str.replace('__VENDOR__', _vendor_dir_uri())
+    pastas = [UI_LOCAL_PATH, os.path.join(os.environ.get('APPDATA') or tempfile.gettempdir(), 'NEXUS', 'ui')]
+    ultimo_erro = None
+    for pasta in pastas:
+        try:
+            os.makedirs(pasta, exist_ok=True)
+            caminho = os.path.join(pasta, nome_arquivo)
+            with open(caminho, 'w', encoding='utf-8') as f:
+                f.write(html_final)
+            return pathlib.Path(caminho).as_uri()
+        except OSError as e:
+            ultimo_erro = e
+    raise ultimo_erro
+
+
 HTML_CONTENT = r"""<!DOCTYPE html>
 <html lang="pt-BR" class="dark h-full">
 <head>
@@ -1868,9 +1923,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'self';
-        script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net;
-        style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com;
-        font-src 'self' data: https://cdnjs.cloudflare.com https://fonts.gstatic.com;
+        script-src 'self' file: 'unsafe-inline' 'unsafe-eval';
+        style-src 'self' file: 'unsafe-inline';
+        font-src 'self' file: data:;
         img-src 'self' data: blob:;
         connect-src 'self' https://cogni-data-default-rtdb.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com;
         object-src 'none';
@@ -1879,42 +1934,14 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         frame-src 'none';
     ">
 
-    <!-- VERSOES FIXAS. 'npm/chart.js' sem versao entrega o que o CDN quiser
-         hoje: uma versao nova quebra o app sem aviso, e um pacote comprometido
-         vira execucao de codigo com acesso a ponte pywebview. Sempre fixe.
+    <!-- Tailwind pre-compilado, Font Awesome e fontes: tudo local, em vendor\.
+         Nenhum CDN. O Tailwind e regenerado a cada vez que se usa uma classe
+         nova (build_tools\tailwind.config.js). -->
+    <link rel="stylesheet" href="__VENDOR__/tailwind.local.css">
+    <link rel="stylesheet" href="__VENDOR__/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="__VENDOR__/fonts/inter.css">
 
-         MELHOR AINDA: baixe estes 4 arquivos para uma pasta assets\ e
-         referencie localmente. O app passa a funcionar offline e deixa de
-         depender de tres CDNs de terceiros. Veja COMO_PUBLICAR.md. -->
-    <script src="https://cdn.tailwindcss.com/3.4.5"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-
-    <script>
-        tailwind.config = {
-            darkMode: 'class',
-            theme: { 
-                extend: { 
-                    colors: {
-                        notion: {
-                            bg: '#191919',
-                            sidebar: '#202020',
-                            card: '#222222',
-                            hover: 'rgba(255, 255, 255, 0.055)',
-                            border: '#2f2f2f',
-                            accent: '#2eaadc',
-                            purple: '#7053ff',
-                            text: '#d3d3d3',
-                            subtext: '#8a8a8e'
-                        }
-                    }
-                }
-            }
-        }
-    </script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
         
         html, body {
             height: 100% !important;
@@ -1948,7 +1975,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         input[type="checkbox"] { border-radius: 6px; }
         body {
             font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
-            background-color: #191919;
+            background-color: #000000;
             color: #d3d3d3;
             user-select: none;
         }
@@ -1973,7 +2000,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
            Cada nível desenha um segmento vertical ligando o pai aos filhos e
            um "cotovelo" horizontal até cada item, para dar de bater o olho e
            saber de qual ramo cada nota faz parte. */
-        :root { --tree-line: #3a3a3a; --tree-line-ativa: #2eaadc; --tree-indent: 16px; }
+        :root { --tree-line: #3a3a3a; --tree-line-ativa: #4272c4; --tree-indent: 16px; }
 
         .note-node     { position: relative; }
         .note-row-wrap { position: relative; }
@@ -2033,13 +2060,19 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         .note-toggle.recolhido { transform: rotate(-90deg); }
         .note-toggle-vazio { width: 18px; flex-shrink: 0; }
 
+        /* Arrastar e soltar no Vault */
+        .note-drag-origem { opacity: 0.4; }
+        .note-drop-antes  { box-shadow: inset 0 2px 0 #4272c4; }
+        .note-drop-depois { box-shadow: inset 0 -2px 0 #4272c4; }
+        .note-drop-dentro { background: rgba(66,114,196,0.2) !important; outline: 1px dashed #4272c4; outline-offset: -1px; }
+
         /* Contador de subnotas escondidas */
         .note-badge-filhos {
             font-size: 9px;
             font-family: ui-monospace, "JetBrains Mono", monospace;
-            background: rgba(46,170,220,0.14);
+            background: rgba(66,114,196,0.14);
             color: #7fd0ef;
-            border: 1px solid rgba(46,170,220,0.25);
+            border: 1px solid rgba(66,114,196,0.25);
             border-radius: 999px;
             padding: 0 5px;
             line-height: 15px;
@@ -2047,62 +2080,261 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         }
 
         .notion-card {
-            background-color: #202020;
-            border: 1px solid #2f2f2f;
+            background-color: transparent;
+            border: 1px solid transparent;
             transition: all 0.15s ease-in-out;
         }
         .notion-card:hover {
-            border-color: rgba(255, 255, 255, 0.18);
-            background-color: #242424;
+            background-color: rgba(255, 255, 255, 0.07);
         }
         .notion-card.selected {
-            border-color: #2eaadc;
-            background-color: rgba(46, 170, 220, 0.08);
+            border-color: #4272c4;
+            background-color: rgba(66, 114, 196, 0.08);
         }
+
+
+        /* ---- Icones 2D cinza: decorativos ficam cinza; os personalizaveis
+           (categoria, projeto, nota) levam .cg-keep e preservam a cor. ---- */
+        i[class*="text-sky-"]:not(.cg-keep), i[class*="text-amber-"]:not(.cg-keep), i[class*="text-purple-"]:not(.cg-keep),
+        i[class*="text-emerald-"]:not(.cg-keep), i[class*="text-blue-"]:not(.cg-keep), i[class*="text-cyan-"]:not(.cg-keep),
+        i[class*="text-green-"]:not(.cg-keep), i[class*="text-yellow-"]:not(.cg-keep), i[class*="text-orange-"]:not(.cg-keep),
+        i[class*="text-pink-"]:not(.cg-keep), i[class*="text-indigo-"]:not(.cg-keep), i[class*="text-violet-"]:not(.cg-keep) { color: #8a8a8e !important; }
+        .nav-btn.active i:not(.cg-keep) { color: #d3d3d3 !important; }
+
+
+        /* ---- Tema preto: azul marinho nos icones/destaques, sidebar estilo Claude ---- */
+        html, body { background: #000000 !important; }
+        [class*="bg-sky-"] { background-color: rgba(66,114,196,0.16) !important; }
+        [class*="border-sky-"] { border-color: rgba(66,114,196,0.38) !important; }
+        [class*="text-sky-"]:not(i) { color: #7ca3e6 !important; }
+        i.cg-keep { color: #4272c4 !important; }
+        aside { background: #000000 !important; border-right: 1px solid #1c1c1c !important; }
+        aside .nav-btn { padding: 8px 10px !important; font-size: 14px !important; border-radius: 9px !important; gap: 12px !important; color: #c8c8cc; }
+        aside .nav-btn:hover { background: rgba(255,255,255,0.06) !important; }
+        aside .nav-btn.active { background: #171717 !important; color: #ffffff !important; }
+        aside .uppercase { text-transform: none !important; letter-spacing: 0 !important; font-size: 12px !important; font-weight: 500 !important; color: #7d7d82 !important; }
+        aside hr { border: 0 !important; margin: 10px 0 2px !important; }
+        .seg-tab { padding: 9px 0; border-radius: 9px; font-size: 14px; font-weight: 500; }
+        .pane-tab { display:flex; align-items:center; gap:6px; padding:6px 10px; border-radius:8px 8px 0 0; font-size:12px; max-width:190px; cursor:pointer; color:#8a8a8e; border:1px solid transparent; border-bottom:0; }
+        .pane-tab:hover { background: rgba(255,255,255,0.05); }
+        .pane-tab.ativa { background:#000; color:#fff; border-color:#262626; font-weight:600; }
+        .note-pane { border-right: 1px solid #262626; }
+        .note-pane:last-child { border-right: 0; }
+        .note-pane.foco .pane-tabbar { box-shadow: inset 0 2px 0 #4272c4; }
+        .tab-drop { background: rgba(66,114,196,0.25) !important; }
+
+
+        /* ---- Tipografia unica (mesmo padrao da barra lateral) em TODO o app ---- */
+        body { font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif !important; font-size: 14px; letter-spacing: -0.003em; }
+        .font-mono { font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', monospace !important; }
+        .text-xs { font-size: 14px !important; line-height: 1.45 !important; }
+        .text-sm { font-size: 15px !important; line-height: 1.5 !important; }
+        .text-\[9px\], .text-\[8px\] { font-size: 11px !important; }
+        .text-\[10px\] { font-size: 12px !important; }
+        .text-\[11px\] { font-size: 12.5px !important; }
+        button, input, select, textarea { font-family: inherit; }
+        input, select, textarea { font-size: 14px; }
+        h1, h2, h3, h4 { letter-spacing: -0.015em; }
+
+        /* ---- Barra do Vault: nunca sobrepoe, em qualquer largura de janela ---- */
+        .note-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 16px; }
+        .note-toolbar .nt-title { flex: 1 1 240px; min-width: 0; display: flex; align-items: center; gap: 8px; order: 1; }
+        .note-toolbar .nt-title input { min-width: 0; }
+        .note-toolbar .nt-actions { flex: 0 0 auto; order: 2; margin-left: auto; }
+        .note-toolbar .nt-format { flex: 1 1 100%; order: 3; min-width: 0; }
+        .note-toolbar .nt-format button { white-space: nowrap; }
+        .note-editor { font-size: 15.5px !important; line-height: 1.75 !important; padding: 28px clamp(16px, 4vw, 48px) !important; overflow-wrap: anywhere; }
+        .note-editor h1 { font-size: 1.9rem; letter-spacing: -0.02em; }
+        .note-editor h2 { font-size: 1.45rem; letter-spacing: -0.015em; }
+        .pane-tab { font-size: 13px !important; }
+        textarea.step-edit { field-sizing: content; }
 
         ::-webkit-scrollbar { width: 5px; height: 5px; }
         ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: #333333; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: #444444; }
+        ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #3a3a3a; }
 
-        #noteEditorBody:empty:before {
+        .note-editor:empty:before {
             content: attr(placeholder);
             color: #55555e;
             pointer-events: none;
             display: block;
         }
-        #noteEditorBody h1 { font-size: 1.75rem; font-weight: 700; margin-top: 1rem; margin-bottom: 0.5rem; color: #ffffff; border-bottom: 1px solid #2f2f2f; padding-bottom: 0.25rem; }
-        #noteEditorBody h2 { font-size: 1.35rem; font-weight: 600; margin-top: 0.75rem; margin-bottom: 0.35rem; color: #f0f0f3; }
-        #noteEditorBody ul { list-style-type: disc; margin-left: 1.5rem; margin-top: 0.3rem; margin-bottom: 0.3rem; }
-        #noteEditorBody ol { list-style-type: decimal; margin-left: 1.5rem; margin-top: 0.3rem; margin-bottom: 0.3rem; }
-        #noteEditorBody blockquote { border-left: 3px solid #2eaadc; padding-left: 0.75rem; color: #9b9b9b; font-style: italic; margin: 0.5rem 0; }
-        #noteEditorBody mark { background: rgba(234, 179, 8, 0.25); color: #fef08a; padding: 0.1rem 0.3rem; border-radius: 3px; }
-        #noteEditorBody code { font-family: 'JetBrains Mono', monospace; background: #282828; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #e2e2e2; }
+        .note-editor h1 { font-size: 1.75rem; font-weight: 700; margin-top: 1rem; margin-bottom: 0.5rem; color: #ffffff; border-bottom: 1px solid #262626; padding-bottom: 0.25rem; }
+        .note-editor h2 { font-size: 1.35rem; font-weight: 600; margin-top: 0.75rem; margin-bottom: 0.35rem; color: #f0f0f3; }
+        .note-editor ul { list-style-type: disc; margin-left: 1.5rem; margin-top: 0.3rem; margin-bottom: 0.3rem; }
+        .note-editor ol { list-style-type: decimal; margin-left: 1.5rem; margin-top: 0.3rem; margin-bottom: 0.3rem; }
+        .note-editor hr { border: 0; border-top: 1px solid #3a3a3a; margin: 1rem 0; }
+        .note-editor blockquote { border-left: 3px solid #4272c4; padding-left: 0.75rem; color: #9b9b9b; font-style: italic; margin: 0.5rem 0; }
+        .note-editor mark { background: rgba(234, 179, 8, 0.25); color: #fef08a; padding: 0.1rem 0.3rem; border-radius: 3px; }
+        .note-editor code { font-family: 'JetBrains Mono', monospace; background: #141414; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #e2e2e2; }
+
+
+        /* ---- Menu lateral recolhivel (so icones, continua clicavel) ---- */
+        #nx-sidebar { transition: width .22s cubic-bezier(.2,.8,.2,1); overflow: hidden; }
+        #nx-sidebar.sb-collapsed { width: 56px; }
+        .sb-collapsed span, .sb-collapsed input, .sb-collapsed .sb-section { display: none !important; }
+        /* Recolhido: arvore do Vault vira uma coluna plana so de icones (todas as notas e subnotas) */
+        .nx-rail { display: none; }
+        .sb-collapsed #notepad-tree-container { display: none; }
+        .sb-collapsed .nx-rail { display: flex; flex-direction: column; align-items: center; gap: 3px; overflow-y: auto; flex: 1; padding: 2px 0; }
+        .nx-rb { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: #38bdf8; font-size: 13px; transition: background .15s; cursor: pointer; }
+        .nx-rb.sub { width: 26px; height: 26px; font-size: 11px; }
+        .nx-rb:hover { background: rgba(255,255,255,.08); }
+        .nx-rb.on { background: rgba(66,114,196,.28); box-shadow: inset 0 0 0 1px rgba(66,114,196,.55); }
+        .nx-corbtn { width: 24px; height: 24px; border-radius: 999px; border: 2px solid transparent; box-shadow: inset 0 0 0 1px rgba(255,255,255,.25); cursor: pointer; transition: transform .12s; }
+        .nx-corbtn:hover { transform: scale(1.12); }
+        .nx-corbtn.on { border-color: #4272c4; }
+        .sb-collapsed .p-3 { padding: 8px 6px; }
+        .sb-collapsed #sidebar-tasks-panel, .sb-collapsed #sidebar-notepad-panel { padding: 8px 6px; }
+        .sb-collapsed .sb-top { justify-content: center; }
+        .sb-collapsed .grid { grid-template-columns: 1fr; }
+        .sb-collapsed .seg-tab { font-size: 0; padding: 8px 0; }
+        .sb-collapsed .seg-tab i { font-size: 14px; }
+        .sb-collapsed .nav-btn { justify-content: center; padding-left: 0; padding-right: 0; }
+        .sb-collapsed .nav-btn i { font-size: 14px; }
+        .sb-collapsed #sb-search { height: 32px; cursor: pointer; }
+        .sb-collapsed #sb-search i { left: 50%; transform: translate(-50%, -50%); font-size: 14px; color: #9ca3af; }
+        .sb-collapsed #sidebar-categories button:not(.nav-btn), .sb-collapsed #sidebar-projects button:not(.nav-btn) { display: none; }
+        .sb-collapsed #sidebar-projects .group > div:last-child, .sb-collapsed .group > .hidden { display: none !important; }
+        .sb-collapsed #notepad-tree-container .note-children,
+        .sb-collapsed .note-toggle, .sb-collapsed .note-toggle-vazio,
+        .sb-collapsed #notepad-tree-container button[title="Selecionar nota"] { display: none; }
+        .sb-collapsed .note-row-wrap .group { justify-content: center; padding: 6px 0; }
+        .sb-collapsed .note-row-wrap .group > div { justify-content: center; flex: 0 0 auto; }
+        .sb-collapsed .note-node::before, .sb-collapsed .note-node::after,
+        .sb-collapsed .note-row-wrap::before, .sb-collapsed .note-row-wrap::after { display: none; }
+        .sb-collapsed hr { margin: 6px 4px; }
+
+
+        /* ---- Quadro de tarefas no Vault ---- */
+        .nx-taskblock { background:#121212; border:1px solid #262626; border-radius:10px; padding:10px 12px; margin:14px 0; user-select:none; font-size:12px; color:#d3d3d3; }
+        .nx-tb-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:10px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:#8a8a8e; }
+        .nx-tb-head b { margin-left:auto; font-family:'JetBrains Mono',monospace; color:#9ca3af; }
+        .nx-tb-row { display:flex; align-items:center; gap:8px; padding:5px 4px; border-radius:6px; }
+        .nx-tb-row:hover { background:rgba(255,255,255,.04); }
+        .nx-tb-check { width:16px; height:16px; border-radius:4px; border:1px solid #52525b; display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; font-size:9px; cursor:pointer; }
+        .nx-tb-check:hover { border-color:#4272c4; }
+        .nx-tb-row.done .nx-tb-check { background:#059669; border-color:#059669; }
+        .nx-tb-title { flex:1; min-width:0; cursor:text; overflow-wrap:anywhere; }
+        .nx-tb-row.done .nx-tb-title { text-decoration:line-through; color:#6b7280; }
+        .nx-tb-act { color:#6b7280; padding:2px 5px; border-radius:5px; cursor:pointer; font-size:11px; opacity:0; }
+        .nx-tb-row:hover .nx-tb-act { opacity:1; }
+        .nx-tb-act:hover { color:#fff; background:rgba(255,255,255,.08); }
+        .nx-tb-act.del:hover { color:#fb7185; }
+        .nx-tb-empty { color:#6b7280; font-style:italic; padding:4px; }
+        .nx-tb-add { display:flex; gap:6px; margin-top:8px; }
+        .nx-tb-input, .nx-tb-edit { flex:1; min-width:0; background:#050505; border:1px solid #262626; border-radius:6px; padding:5px 8px; color:#e5e5e5; font-size:12px; outline:none; }
+        .nx-tb-input:focus, .nx-tb-edit:focus { border-color:#4272c4; }
+        .nx-tb-addbtn { background:#4272c4; color:#fff; border-radius:6px; padding:0 12px; font-weight:600; cursor:pointer; }
+
+        .nx-tb-grip { cursor:grab; color:#52525b; padding:0 4px; }
+        .nx-tb-grip:hover { color:#d3d3d3; }
+        .nx-taskblock.nx-dragging { opacity:.5; }
+        .nx-drop-line { position:fixed; z-index:9500; height:2px; background:#4272c4; border-radius:2px; display:none; pointer-events:none; box-shadow:0 0 8px #4272c4; }
+        .nx-tb-mv { color:#6b7280; padding:2px 6px; border-radius:5px; cursor:pointer; font-size:10px; }
+        .nx-tb-mv:hover { color:#fff; background:rgba(255,255,255,.08); }
+        .nx-tb-head b { margin-right:6px; }
+        .nx-tb-proj { font-size:10px; padding:1px 7px; border-radius:999px; background:rgba(66,114,196,.12); border:1px solid rgba(66,114,196,.3); color:#93b4ea; white-space:nowrap; max-width:38%; overflow:hidden; text-overflow:ellipsis; cursor:pointer; flex-shrink:0; }
+        .nx-tb-proj i { margin-right:4px; font-size:9px; }
+        .nx-tb-proj.vazio { background:transparent; border-style:dashed; border-color:#3a3a3a; color:#6b7280; opacity:0; }
+        .nx-tb-row:hover .nx-tb-proj.vazio { opacity:1; }
+        .nx-tb-projsel, .nx-tb-rowproj { background:#050505; border:1px solid #262626; border-radius:6px; padding:4px 6px; color:#d3d3d3; font-size:11px; max-width:130px; outline:none; }
+        .nx-tb-linkbtn { border:1px solid #262626; border-radius:6px; padding:0 10px; color:#9ca3af; cursor:pointer; }
+        .nx-tb-linkbtn:hover { color:#fff; border-color:#4272c4; }
+        .nx-tb-search { margin-top:8px; padding-top:8px; border-top:1px dashed #262626; }
+        .nx-tb-search-input { width:100%; background:#050505; border:1px solid #262626; border-radius:6px; padding:5px 8px; color:#e5e5e5; font-size:12px; outline:none; }
+        .nx-tb-search-input:focus { border-color:#4272c4; }
+        .nx-tb-results { margin-top:6px; max-height:180px; overflow-y:auto; }
+        .nx-tb-res { display:flex; align-items:center; gap:8px; padding:5px 6px; border-radius:6px; cursor:pointer; }
+        .nx-tb-res:hover { background:rgba(66,114,196,.14); }
+        .nx-tb-res i { color:#4272c4; font-size:10px; }
+        #nx-sel-fab { position:fixed; z-index:9000; display:none; background:#4272c4; color:#fff; font-size:11px; font-weight:600; padding:5px 10px; border-radius:999px; box-shadow:0 6px 18px rgba(0,0,0,.5); cursor:pointer; white-space:nowrap; }
+
+        /* ---- Motion: carregamento, entradas, feedback ---- */
+        @keyframes nxIn    { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+        @keyframes nxFade  { from { opacity:0; } to { opacity:1; } }
+        @keyframes nxPop   { from { opacity:0; transform:translateY(12px) scale(.96); } to { opacity:1; transform:none; } }
+        @keyframes nxSlide { from { opacity:0; transform:translateX(22px); } to { opacity:1; transform:none; } }
+        @keyframes nxBar   { 0% { transform:translateX(-100%); } 100% { transform:translateX(250%); } }
+        @keyframes nxBreath{ 0%,100% { transform:scale(1); box-shadow:0 0 0 0 rgba(66,114,196,.0), 0 10px 30px rgba(0,0,0,.6); } 50% { transform:scale(1.06); box-shadow:0 0 0 10px rgba(66,114,196,.10), 0 14px 38px rgba(0,0,0,.7); } }
+        @keyframes nxPulse { 0% { box-shadow:0 0 0 0 rgba(16,185,129,.5); } 100% { box-shadow:0 0 0 12px rgba(16,185,129,0); } }
+        @keyframes nxToastIn  { from { opacity:0; transform:translateY(14px) scale(.96); } to { opacity:1; transform:none; } }
+        @keyframes nxToastOut { to { opacity:0; transform:translateY(8px) scale(.98); } }
+
+        #nx-splash { position:fixed; inset:0; z-index:9999; background:#000; display:flex; align-items:center; justify-content:center; transition:opacity .4s ease, visibility .4s; }
+        #nx-splash.out { opacity:0; visibility:hidden; pointer-events:none; }
+        .nx-splash-box { display:flex; flex-direction:column; align-items:center; gap:14px; animation:nxPop .5s ease-out both; }
+        .nx-splash-logo { width:72px; height:72px; border-radius:20px; background:#0a0a0a; border:1px solid #262626; display:flex; align-items:center; justify-content:center; padding:14px; animation:nxBreath 2.2s ease-in-out infinite; }
+        .nx-splash-logo img { width:100%; height:100%; object-fit:contain; }
+        .nx-splash-name { font-size:1.4rem; font-weight:800; letter-spacing:.18em; color:#fff; }
+        .nx-splash-bar { width:160px; height:3px; border-radius:999px; background:#1a1a1a; overflow:hidden; }
+        .nx-splash-bar span { display:block; width:40%; height:100%; border-radius:999px; background:#4272c4; animation:nxBar 1.1s ease-in-out infinite; }
+        .nx-splash-text { font-size:12px; font-weight:500; color:#6b6b6b; min-height:16px; }
+
+        /* telas, painel lateral e modais */
+        #main-tasks-view:not(.hidden), #main-notepad-view:not(.hidden) { animation:nxIn .35s cubic-bezier(.2,.8,.2,1) both; }
+        #taskDetailDrawer:not(.hidden) { animation:nxSlide .28s cubic-bezier(.2,.8,.2,1) both; }
+        .fixed.inset-0:not(.hidden) { animation:nxFade .2s ease-out; }
+        .fixed.inset-0:not(.hidden) > div { animation:nxPop .28s cubic-bezier(.2,.8,.2,1) both; }
+
+        /* botoes: sobe no hover, afunda no clique */
+        button:not(:disabled) { transition:transform .2s ease-out, background-color .18s ease, border-color .18s ease, color .18s ease, box-shadow .2s ease, opacity .18s ease; }
+        button:not(:disabled):hover { transform:translateY(-1px); }
+        .note-toolbar button:hover { transform:none; }
+        button:not(:disabled):active { transform:translateY(0) scale(.97) !important; transition-duration:.08s; }
+        aside button i, header button i { transition:transform .2s ease; }
+        aside button:hover i, header button:hover i { transform:scale(1.12); }
+        input, select, textarea { transition:border-color .18s ease, box-shadow .18s ease, background-color .18s ease; }
+        .nx-cloud-pop { animation:nxPulse .9s ease-out; border-radius:999px; }
+
+        /* confirmacao (toast) */
+        #nx-toasts { position:fixed; right:20px; bottom:20px; z-index:9998; display:flex; flex-direction:column; gap:8px; pointer-events:none; }
+        .nx-toast { background:#141414; color:#fff; border:1px solid #262626; font-size:12px; font-weight:600; padding:10px 14px; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.6); display:flex; align-items:center; gap:8px; animation:nxToastIn .3s cubic-bezier(.2,.8,.2,1) both; }
+        .nx-toast i { color:#34d399; }
+        .nx-toast.out { animation:nxToastOut .25s ease-in both; }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; } }
     </style>
 </head>
-<body class="h-full w-full flex flex-col antialiased overflow-hidden select-none bg-[#191919] text-[#d3d3d3]">
+<body class="h-full w-full flex flex-col antialiased overflow-hidden select-none bg-[#000000] text-[#d3d3d3]">
+
+    <!-- TELA DE CARREGAMENTO -->
+    <div id="nx-splash" role="status" aria-live="polite">
+        <div class="nx-splash-box">
+            <div class="nx-splash-logo"><img id="nx-splash-img" alt="NEXUS"></div>
+            <div class="nx-splash-name">NEXUS</div>
+            <div class="nx-splash-bar"><span></span></div>
+            <div class="nx-splash-text" id="nx-splash-text">Iniciando...</div>
+        </div>
+    </div>
 
     <!-- HEADER ESTILO NOTION -->
-    <header class="h-12 bg-[#202020] border-b border-[#2f2f2f] px-4 flex items-center justify-between z-30 select-none flex-shrink-0 w-full">
+    <header class="h-12 bg-[#0a0a0a] border-b border-[#262626] px-4 flex items-center justify-between z-30 select-none flex-shrink-0 w-full">
         <div class="flex items-center gap-2.5">
             <div class="w-6 h-6 flex items-center justify-center bg-transparent flex-shrink-0">
                 <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAAK+0lEQVR42u2da6xdRRXH/+vce6GWUh6JyKNAC1KNaUqBgopo1EQoIK9gDIm1mOADHzGG4BfBEHwgEI0xGI1fRHm0QvCDAiYQRRGQGgm+EPoAUcFaobRQQik9j58fzhozjnufs/d53HPO7Z7k5t59z5y9Z6//zH89ZmaNVJWRFpvERgOW0XbMjAqA4Qp+ytvcMrNW8llNUs2BaFYADF7wCoL160MkzfcquyQ9l3yuSQDCxlzwNUk1M2v49UpJZ0haLmmJpIO86g5JT0v6k6R7zOwRrz+dNVqqUoDjgZnoejlwE7CV7mWr110RfX/G9UZVCgh/2nu+gCOBLwPbIgHvAepAI/mp+2ehbAO+ChwVRpOPiKrk8XzgbuB1wCeAxyOB1oFmgRHQ9LqhPAF8EpifPqcqSc/0v88EfpkIvkX50kpGxP3A2RHI/x1pFc+3r08AbgZejQTfKNDbu42KRjQidgO3ACfutfrBBR/z/BHO1c/nUEieUJsJEN3AiilsG3ANsChpk+1NPL+f8/xfStBN3JvrbvFsTf7X6EJLMbiPu35YMKf1g3N7TDergF8llk2zBJ//GrgIONp/LnKOj+/X6kJdqX44K4wAp6XanKGb6PpE4Id99NiNwGdCj02etR/wKWBDHyPqZuCkxCS2SRX+dNSjDnPO3VqC52PO3g5cCyxO9UiwoiKdcrQ/64WSzwod4d/+rMOzOtGk8HwwK/cHPuo9tww9BIG9BtxWxGrJsKpWAD/yexTxI1Ka2wx8HFgYdaipcef5mG7eD/yihCOV9tT7gfOzPOSS7Tg3w68o0477gHPLtmPUcZtbStjzac97yrn8gH56XjISF7rFtbnHkbgbWDt28aUucZuy3Ps88PVgm0fRzEHqosOB64HnMpRwEV30wljElwrGbYr2rob3rlOGNcwzrLGVPkobPVpjo4sv9Rm3Se3vh1xX1GbD/o79EQflbOCBPvyREF+qDWrEFupFwLKScZs8e37/lK9nkTrDCF4AfLoP/yHEl5ZF72LDEH5o8MXAlhIc2kjs+esiDh1ZDCZ9tuuwa/vwH7YAFw8chET4l0cP3FOil7wGrPMpxbGKQmZYcSe5TtrdgxXXAD4/UBAi4V+SzD4V5ckHgXOSOPzYOTSJ2TrluumBEmZrPEt3SSy7QQj/VKePImHfUDbFcZtJiTRmRGzT+FIRut0OnNoXCD40a04VP456QaeeD/BP4CvAGyc51p7oh2OBLwHPJu+aVYKM7ghWXU/vHvWC44Ed/tBunI/z54H+3Xkxv05gQHEG2Nf/PsCtHQrohJbL7PieR0HEh1dGHFdkHrYF/BH4yLjzfgl9cLG/U7dOSCKrK3ryDyL6MeCuEgCkw/Nu4J1Jj6qNseDTiaPT/B1aBagnC4A7w31LNyQado8WGHZZdBTqvwx8G1g6yBjPkDl/KXADsDPjfYq+Py67haVBSAJsT0SOSdllIbFH+Tf3Iw4YJ6sosXoWApd5W7PeoWhpRjGjI/sBYHE0mdIs4A0W8QvWAxdGHDsS/ZCsR5oGLgAeLmH3d/KHmlHIZXEnAPrl45akaUlTkhqSstbnm6QZSU2v81ZJ6yStA04xs4aZNWfLMw6er5m1zKwBnCzpVkm3SXqbt7Hpbc5qD15nyt+9r4W/vQIQBP2MpKskbfLG0AGI0OCmP/cDku71+PxRZlaXNDSfIQommpnVgUXAdZLukfRBb1Mj6lB5gsfrbJZ0tctAOe/c+/DsQkExxx0MLHFFW0ZpxcN3g3ucQ/GaM7zbSyPdVsTCS42K77hzdnCOjixMQf0CsAk4LvreO9xsbRWMr2etz1k1KLM1w6w8PZm/KNu+nwGnRfc7zmUwMgA2ep0asE+k0D4cma9l4+t7gB8ELzI1EXucAVsOfD8SZtn5i9+7MxaU9j7+zoXkM3QA4mEeDfU3AF+I1gK1Ss6/bgGuBg7JEmrBeerXA1d5fKpMjL8VrRG6Ejg09pCjdxwrAGo58fU3AzcCr/Rotj7mI2pep/nixKycB3wI+HOPZuUuX8H3lqz5i37kM3QAsgTi16uAe/tYn3MX8N60p2c85z3AnX085+fAWZ0WCEwEADmBrQU9rJSLe+ZO4HvAsRnPOQb4LvBSjyNtM/CxyBLLdRAnCoCcWMthPv/6XEmzNQD1rIc1DgIO9PDBMyV0TSNZj3R9mbWgEwlAh/U5a6P7FVm/mS5fLLssph7da517wqWsrUHKZ1ZDw2aGu/81Dwc8Imm1pAskrXcPsyap3iGsEdz/hqR3SXq3/x3CInnhg7rfe1rSb/2Zq83sd8Hf8LDIrKY7GEls3uMw9Sg08FO1N2BfJukpj8PIBZvX7hDWaEbAZZVwjxm1N3NfLukMM/tJu2MybWb1UW3mHunkiO+AbzkQL5vZNyWdLulbkl5JhKyc+FJeyCIGZ5ekGySdbmbfkLTTn0nYhT+qMvLZqUBLwdY2s7+a2eckrZJ0ZyToRsHIYyuKVpqkuyWtMrPPmtmTwUcZBd2MJQAJEPVgtprZQx4xXSPp0Yhm6BKlDfT0B//uhWb2YDArnW7GJq3N2M3PmlnTFfWUpIaZrXVaukLSFu/V5AjfJP1L0hclvc/MbpVUd0Ab45g9ZWz3PvkkTTBbt5vZNcDDPnlyqFNNLaKdIPzVZnZf9N3mqHl+okZAjn4IXukGSS/mmJrmnz3hdafHhecnFoDYonH6mN9l1E5Lmu91JyJr1qRtRm4WUMLNSXqhvTdbSAVAVSoAKgCqUgFQAVABUJUKgAqAqlQATGxhmAA01XkSZB9J83LSyc/lYv7O8yTt26FeS11CI90A2Cnp1QykzW+8SNIKjzjO7BXdvS34GX/nE1wGraQDBlntkvRSLwDgyyh2qj0JkgWA1I4+XgYsMbPdk7YbsgfhhzD3bmCJ2osIwr6ILAC2mNlOX3HRKgyAo1vz3+tz2jPlyJ8s6Q7g/Gi3y5xKCxyWP/psXR04T9Idkla6DPI2dKzvWddGK4CX+6bjvDTBcfKO24eRFnjoK9E60E1GeuXbokSAjQ7plHcAy2NZ9oy8r9fvlKogKyXN4uglpicNgGSZ+2Lga0kqm0aXVAU3+gKDWr+cFxI0bemynSddNjiwZB2zCUBOso6NBZc/xrmDlvXV++Oe4L/XRCuOZzVdzWwAMMB0NXVgTSy7QfDgSBM2DROAnIRN65KEr2USNl0egTiUrFlrZjtl2ZCWy+elLNs+VinL0gZHOmHWkvYNGoAhJ+0bbm6kIaStPKdb2spBATDRaSs7WAr9Jm5tdkvc2i8AcypxawdbeWipi/vctTn3Uhd3sSKGkbx7pgcAZvjf5N2XAk+WMCvHP3l3ltccXQ86fX3Nd0J2A+CYhH7OYy6nr+/i0AziAIfbg/9A+8SlTV1yVxzhdU9kbzrAIUc/DOoIkxc9bcHJkbmYBcAGV7BXeTCsF1002UeY5PkOUa/s5xCfv0eCbWUkCtwBPN2jPT+3DvHJs7/9updjrIpmbezFH5mbx1gViDSWPcit2eXzVkkg946D3HJiMP0cZdhLqY4yLDDbVPYwz6I5PKvDPIv4D1TH2Y6NfqgOdB6x/1DkSPNmhtCrI82HGF+6KXLk6JBnaKvXHd+4TVRszIGoqb0+KeSSOEntrCrLJb1d0lFe9R+SfiPpMUn3eBqcEE1tjSoTysQDEOsHqb17PgJmqaQ3eZWNkjaGTdlp/XEuk3asSMiA8n+9OowWtVPQTMxe4Ym0f6PV2HGuCMY9LUFVxrD8B8dhzR63a2DrAAAAAElFTkSuQmCC" alt="NEXUS" class="w-full h-full object-contain">
             </div>
             <span class="font-bold text-sm tracking-wide text-white">NEXUS</span>
-            <button id="app-version-badge" onclick="abrirUpdateModal()" title="Ver atualizacoes" class="text-[10px] text-[#8a8a8e] font-mono px-1.5 py-0.5 rounded bg-white/5 border border-white/5 hover:text-white hover:border-white/20 transition cursor-pointer">v6.2.0</button>
-            <button id="updateDot" onclick="abrirUpdateModal()" title="Nova versao disponivel" class="hidden items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#2eaadc]/20 border border-[#2eaadc]/40 text-sky-200 cursor-pointer animate-pulse">
+            <button id="app-version-badge" onclick="abrirUpdateModal()" title="Ver atualizacoes" class="text-[10px] text-[#8a8a8e] font-mono px-1.5 py-0.5 rounded bg-white/5 border border-white/5 hover:text-white hover:border-white/20 transition cursor-pointer">__APP_VERSION__</button>
+            <button id="updateDot" onclick="abrirUpdateModal()" title="Nova versao disponivel" class="hidden items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#4272c4]/20 border border-[#4272c4]/40 text-sky-200 cursor-pointer animate-pulse">
                 <i class="fa-solid fa-arrow-up text-[8px]"></i><span id="updateDotLabel">novo</span>
             </button>
         </div>
 
-        <!-- Status ÚNICO: representa o banco na nuvem (Firebase), não mais o
-             arquivo local. Clicar abre o painel de sincronização. -->
-        <div id="dbStatusBar" class="hidden md:flex items-center gap-2.5 bg-white/5 border border-white/5 px-3 py-1 rounded text-xs font-mono select-none" title="Banco de dados na nuvem">
-            <span id="status-dot-indicator" class="w-2 h-2 rounded-full bg-emerald-500 shadow-sm"></span>
-            <i id="cloudBadgeIcon" class="fa-solid fa-cloud text-[11px] text-gray-500"></i>
-            <span id="db-filepath-text" class="text-[#8a8a8e] font-medium truncate max-w-[300px]">Conectando...</span>
-            <span class="text-gray-600">•</span>
-            <span id="status-save-label" class="text-gray-400 font-sans text-[11px]">Pronto</span>
+        <div class="flex items-center gap-3 mr-auto ml-3">
+            <!-- Perfil: o avatar abre o modal de edição. -->
+            <button type="button" onclick="openProfileModal()" id="header-profile-btn" title="Perfil" class="w-7 h-7 rounded-full bg-white/10 border border-white/10 flex items-center justify-center text-white font-bold text-[11px] overflow-hidden flex-shrink-0 hover:border-white/30 transition cursor-pointer">
+                <img id="profile-avatar-img" src="" class="w-full h-full object-cover hidden" alt="Avatar">
+                <span id="profile-initials-sidebar">?</span>
+            </button>
+
+            <!-- Estado da nuvem: so icone e estado, sem nome do servico. -->
+            <div id="dbStatusBar" class="hidden md:flex items-center gap-2 bg-white/5 border border-white/5 px-3 py-1 rounded-full text-xs select-none" title="Nuvem">
+                <span id="status-dot-indicator" class="w-2 h-2 rounded-full bg-emerald-500"></span>
+                <i id="cloudBadgeIcon" class="fa-solid fa-cloud text-[11px] text-gray-500"></i>
+                <span id="db-filepath-text" class="hidden text-[#8a8a8e] font-medium truncate max-w-[200px]"></span>
+                <span id="status-save-label" class="text-gray-400 font-sans text-[11px]">Pronto</span>
+            </div>
         </div>
 
         <div class="flex items-center gap-1.5">
@@ -2110,24 +2342,24 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             <button id="notifBellBtn" onclick="abrirNotificacoesModal()" class="notion-btn px-2.5 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5 cursor-pointer relative" title="Central de Notificações de Prazos">
                 <i id="notifBellIcon" class="fa-regular fa-bell text-xs"></i>
                 <span class="hidden sm:inline">Prazos</span>
-                <span id="notifBadgeCount" class="hidden absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-rose-600 text-white font-bold text-[9px] rounded-full border border-[#202020] shadow-sm">0</span>
+                <span id="notifBadgeCount" class="hidden absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-rose-600 text-white font-bold text-[9px] rounded-full border border-[#0a0a0a] shadow-sm">0</span>
             </button>
 
             <button onclick="executeDiskSave(true)" class="notion-btn px-2.5 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5 cursor-pointer" title="Salvar no Disco">
                 <i class="fa-regular fa-floppy-disk text-xs"></i> <span>Salvar</span>
             </button>
-            <button onclick="exportDatabaseToCSV()" class="notion-btn px-2.5 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5 cursor-pointer" title="Exportar CSV">
-                <i class="fa-solid fa-file-export text-xs"></i> <span>Exportar CSV</span>
+            <button onclick="exportDatabaseFull()" class="notion-btn px-2.5 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1.5 cursor-pointer" title="Exportar o banco INTEIRO (tarefas, categorias, projetos, Vault e perfil)">
+                <i class="fa-solid fa-file-export text-xs"></i> <span>Exportar</span>
             </button>
-            <button onclick="triggerImportCSV()" class="notion-btn px-2.5 py-1 rounded text-xs text-sky-400 hover:text-white flex items-center gap-1.5 cursor-pointer" title="Importar CSV">
-                <i class="fa-solid fa-file-import text-xs"></i> <span>Importar CSV</span>
+            <button onclick="triggerImportBackup()" class="notion-btn px-2.5 py-1 rounded text-xs text-sky-400 hover:text-white flex items-center gap-1.5 cursor-pointer" title="Importar backup (.json) ou CSV antigo">
+                <i class="fa-solid fa-file-import text-xs"></i> <span>Importar</span>
             </button>
-            <input type="file" id="csvFileInput" accept=".csv" class="hidden" onchange="importDatabaseFromCSVFile(event)">
+            <input type="file" id="csvFileInput" accept=".json,.csv,application/json,text/csv" class="hidden" onchange="importDatabaseFromFile(event)">
         </div>
     </header>
 
     <!-- BARRA DE AÇÕES EM MASSA (MULTI-SELEÇÃO) -->
-    <div id="batch-actions-bar" class="hidden bg-[#242428] border-b border-[#2eaadc]/40 px-6 py-2 flex items-center justify-between text-xs transition-all z-20">
+    <div id="batch-actions-bar" class="hidden bg-[#0d0d12] border-b border-[#4272c4]/40 px-6 py-2 flex items-center justify-between text-xs transition-all z-20">
         <div class="flex items-center gap-3">
             <span class="font-bold text-sky-300"><i class="fa-solid fa-check-double mr-1.5"></i> <span id="batch-selected-count">0 itens selecionados</span></span>
             <button onclick="clearAllSelections()" class="text-gray-400 hover:text-white cursor-pointer underline">Limpar Seleção</button>
@@ -2152,62 +2384,55 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     <div class="flex-1 flex flex-col md:flex-row overflow-hidden w-full h-[calc(100vh-3rem)] relative">
         
         <!-- SIDEBAR ESTILO NOTION -->
-        <aside class="w-64 bg-[#202020] border-r border-[#2f2f2f] flex flex-col flex-shrink-0 z-20 h-full select-none">
-            <div class="p-3 border-b border-[#2f2f2f] flex flex-col gap-2.5">
-                <div class="notion-btn rounded p-2 flex items-center justify-between cursor-pointer group hover:bg-white/5 transition" onclick="openProfileModal()">
-                    <div class="flex items-center gap-2.5 truncate">
-                        <div class="w-8 h-8 rounded bg-white/5 border border-white/10 flex items-center justify-center text-white font-bold text-xs flex-shrink-0 overflow-hidden relative">
-                            <img id="profile-avatar-img" src="" class="w-full h-full object-cover hidden" alt="Avatar">
-                            <span id="profile-initials-sidebar">CA</span>
-                        </div>
-                        <div class="truncate">
-                            <h2 id="profile-name" class="font-bold text-xs leading-tight text-white tracking-wide truncate">Caio</h2>
-                            <span id="profile-subtitle" class="text-[10px] text-[#8a8a8e] font-semibold uppercase block truncate">DEV</span>
-                        </div>
-                    </div>
-                    <i class="fa-solid fa-gear text-xs text-gray-500 group-hover:text-gray-300 transition"></i>
+        <aside id="nx-sidebar" class="w-64 bg-[#0a0a0a] border-r border-[#262626] flex flex-col flex-shrink-0 z-20 h-full select-none">
+            <div class="p-3 border-b border-[#262626] flex flex-col gap-2.5">
+                <div class="flex items-center justify-between sb-top">
+                    <span class="text-[11px] font-bold text-[#8a8a8e] uppercase tracking-wider px-1">Menu</span>
+                    <button id="sb-toggle" onclick="toggleSidebar()" title="Recolher menu" class="w-8 h-8 rounded-full flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 cursor-pointer"><i class="fa-solid fa-table-columns text-xs"></i></button>
                 </div>
-
-                <div class="grid grid-cols-2 gap-1 p-0.5 rounded bg-white/5 border border-white/5 text-xs font-semibold">
-                    <button id="mode-btn-tasks" onclick="switchAppMode('tasks')" class="py-1.5 rounded flex items-center justify-center gap-1.5 bg-[#2a2a2a] text-white border border-white/10 transition cursor-pointer">
+                <div class="grid grid-cols-2 gap-1 p-1 rounded-xl bg-white/5 border border-white/5 font-semibold">
+                    <button id="mode-btn-tasks" title="Tarefas" onclick="switchAppMode('tasks')" class="seg-tab flex items-center justify-center gap-2 bg-[#161616] text-white border border-white/10 transition cursor-pointer">
                         <i class="fa-solid fa-list-check text-xs"></i> Tarefas
                     </button>
-                    <button id="mode-btn-notepad" onclick="switchAppMode('notepad')" class="py-1.5 rounded flex items-center justify-center gap-1.5 text-gray-400 hover:text-white transition cursor-pointer">
+                    <button id="mode-btn-notepad" title="Vault" onclick="switchAppMode('notepad')" class="seg-tab flex items-center justify-center gap-2 text-gray-400 hover:text-white transition cursor-pointer">
                         <i class="fa-solid fa-book-bookmark text-xs"></i> Vault
                     </button>
                 </div>
             </div>
 
             <div id="sidebar-tasks-panel" class="flex-1 overflow-y-auto p-2 space-y-0.5 text-xs">
-                <div class="pb-1.5">
-                    <div class="relative">
+                <button title="Nova tarefa" onclick="document.getElementById('quickTaskInput').focus()" class="nav-btn notion-btn w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded font-medium text-gray-200 cursor-pointer">
+                    <i class="fa-solid fa-plus text-xs w-4 text-center"></i> <span class="flex-1 text-left">Nova tarefa</span>
+                </button>
+                <div class="pb-1.5 pt-1">
+                    <div class="relative" id="sb-search" onclick="if (document.getElementById('nx-sidebar').classList.contains('sb-collapsed')) { toggleSidebar(false); document.getElementById('searchInput').focus(); }" title="Buscar tarefas">
                         <i class="fa-solid fa-magnifying-glass absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500 text-xs"></i>
                         <input type="text" id="searchInput" oninput="debouncedRenderTasksList()" placeholder="Buscar tarefas..." class="w-full pl-8 pr-2.5 py-1.5 bg-white/5 hover:bg-white/10 focus:bg-white/10 border border-transparent focus:border-white/20 rounded text-xs text-gray-200 placeholder-gray-500 focus:outline-none transition">
                     </div>
                 </div>
 
-                <button onclick="selectList('myday')" id="nav-myday" class="nav-btn notion-btn active w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded font-medium text-gray-300 cursor-pointer">
+                <button title="Meu Dia" onclick="selectList('myday')" id="nav-myday" class="nav-btn notion-btn active w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded font-medium text-gray-300 cursor-pointer">
                     <i class="fa-regular fa-sun text-xs w-4 text-center text-amber-400"></i> <span class="flex-1 text-left">Meu Dia</span> <span id="badge-myday" class="text-[11px] text-gray-400 font-mono font-bold">0</span>
                 </button>
-                <button onclick="selectList('planned')" id="nav-planned" class="nav-btn notion-btn w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded font-medium text-gray-300 cursor-pointer">
+                <button title="Planejadas" onclick="selectList('planned')" id="nav-planned" class="nav-btn notion-btn w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded font-medium text-gray-300 cursor-pointer">
                     <i class="fa-regular fa-calendar-check text-xs w-4 text-center text-sky-400"></i> <span class="flex-1 text-left">Planejadas</span> <span id="badge-planned" class="text-[11px] text-gray-400 font-mono font-bold">0</span>
                 </button>
-                <button onclick="selectList('all')" id="nav-all" class="nav-btn notion-btn w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded font-medium text-gray-300 cursor-pointer">
+                <button title="Todas as Tarefas" onclick="selectList('all')" id="nav-all" class="nav-btn notion-btn w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded font-medium text-gray-300 cursor-pointer">
                     <i class="fa-solid fa-bars-staggered text-xs w-4 text-center text-purple-400"></i> <span class="flex-1 text-left">Todas as Tarefas</span> <span id="badge-all" class="text-[11px] text-gray-400 font-mono font-bold">0</span>
                 </button>
 
-                <hr class="my-2.5 border-[#2f2f2f]">
+                <hr class="my-2.5 border-[#262626]">
                 <div>
-                    <div class="flex items-center justify-between px-2.5 py-1 text-[11px] font-bold text-[#8a8a8e] uppercase tracking-wider">
+                    <div class="sb-section flex items-center justify-between px-2.5 py-1 text-[11px] font-bold text-[#8a8a8e] uppercase tracking-wider">
                         <span>Categorias</span>
                         <button onclick="openCategoryModal()" class="text-gray-500 hover:text-white cursor-pointer transition p-0.5" title="Nova Categoria"><i class="fa-solid fa-plus text-xs"></i></button>
                     </div>
                     <div id="sidebar-categories" class="space-y-0.5"></div>
                 </div>
 
-                <hr class="my-2.5 border-[#2f2f2f]">
+                <hr class="my-2.5 border-[#262626]">
                 <div>
-                    <div class="flex items-center justify-between px-2.5 py-1 text-[11px] font-bold text-[#8a8a8e] uppercase tracking-wider">
+                    <div class="sb-section flex items-center justify-between px-2.5 py-1 text-[11px] font-bold text-[#8a8a8e] uppercase tracking-wider">
                         <span>Projetos</span>
                         <button onclick="openProjectModal()" class="text-gray-500 hover:text-white cursor-pointer transition p-0.5" title="Novo Projeto"><i class="fa-solid fa-plus text-xs"></i></button>
                     </div>
@@ -2217,7 +2442,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
             <!-- SIDEBAR VAULT NOTES PANEL WITH MULTI-SELECTION -->
             <div id="sidebar-notepad-panel" class="flex-1 flex flex-col p-2 overflow-y-auto space-y-2 hidden text-xs">
-                <div class="flex items-center justify-between px-2 py-1 text-[11px] font-bold text-[#8a8a8e] uppercase tracking-wider">
+                <div class="sb-section flex items-center justify-between px-2 py-1 text-[11px] font-bold text-[#8a8a8e] uppercase tracking-wider">
                     <span>Estrutura do Vault</span>
                     <div class="flex items-center gap-1">
                         <button id="btn-expandir-tudo" onclick="expandirOuRecolherTudo()" class="notion-btn px-2 py-1 rounded text-gray-400 hover:text-white cursor-pointer" title="Expandir/Recolher tudo">
@@ -2228,15 +2453,16 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                         </button>
                     </div>
                 </div>
-                <div id="notepad-tree-container" class="flex-1 overflow-y-auto space-y-0.5"></div>
+                <div id="notepad-tree-container" ondragover="noteContainerDragOver(event)" ondrop="noteContainerDrop(event)" class="flex-1 overflow-y-auto space-y-0.5"></div>
+                <div id="notepad-rail" class="nx-rail"></div>
             </div>
         </aside>
 
         <!-- MAIN TASKS & RESPONSIVE DRAWER WORKSPACE -->
-        <main id="main-tasks-view" class="flex-1 flex h-full overflow-hidden bg-[#191919] relative min-w-0 transition-all">
+        <main id="main-tasks-view" class="flex-1 flex h-full overflow-hidden bg-[#000000] relative min-w-0 transition-all">
             
             <div class="flex-1 flex flex-col h-full overflow-hidden min-w-0">
-                <header class="px-6 py-4 flex items-center justify-between border-b border-[#2f2f2f] flex-wrap gap-2 flex-shrink-0">
+                <header class="px-6 py-4 flex items-center justify-between border-b border-[#262626] flex-wrap gap-2 flex-shrink-0">
                     <div class="flex items-center gap-3 min-w-0">
                         <i id="current-list-icon" class="fa-regular fa-sun text-xl text-amber-400 flex-shrink-0"></i>
                         <div class="min-w-0">
@@ -2247,22 +2473,19 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
                     <div class="flex items-center gap-2 flex-shrink-0">
                         <div class="flex flex-wrap items-center bg-white/5 border border-white/5 p-0.5 rounded text-xs font-semibold">
-                            <button id="view-mode-list" onclick="setViewMode('list')" class="px-2.5 py-1 rounded bg-[#2a2a2a] text-white border border-white/10 transition cursor-pointer">
+                            <button id="view-mode-list" onclick="setViewMode('list')" class="px-2.5 py-1 rounded bg-[#161616] text-white border border-white/10 transition cursor-pointer">
                                 <i class="fa-solid fa-list mr-1"></i> Lista
                             </button>
                             <button id="view-mode-kanban" onclick="setViewMode('kanban')" class="px-2.5 py-1 rounded text-gray-400 hover:text-white transition cursor-pointer">
                                 <i class="fa-solid fa-table-columns mr-1"></i> Kanban
-                            </button>
-                            <button id="view-mode-charts" onclick="setViewMode('charts')" class="px-2.5 py-1 rounded text-gray-400 hover:text-white transition cursor-pointer">
-                                <i class="fa-solid fa-chart-pie mr-1"></i> Gráficos
                             </button>
                         </div>
                     </div>
                 </header>
 
                 <div class="px-6 pt-3 pb-1 flex-shrink-0" id="quick-input-container">
-                    <div class="bg-[#202020] border border-[#2f2f2f] hover:border-white/20 focus-within:border-[#2eaadc]/50 rounded p-2.5 flex items-center gap-3 transition">
-                        <button onclick="createNewTaskFromInput()" class="text-[#2eaadc] hover:text-sky-300 transition cursor-pointer">
+                    <div class="bg-[#0a0a0a] border border-[#262626] hover:border-white/20 focus-within:border-[#4272c4]/50 rounded p-2.5 flex items-center gap-3 transition">
+                        <button onclick="createNewTaskFromInput()" class="text-[#4272c4] hover:text-sky-300 transition cursor-pointer">
                             <i class="fa-solid fa-plus text-sm"></i>
                         </button>
                         <input type="text" id="quickTaskInput" onkeydown="if(event.key==='Enter') createNewTaskFromInput()" placeholder="Adicionar uma tarefa no NEXUS... (Pressione Enter)" class="w-full min-w-0 bg-transparent text-xs text-gray-100 placeholder-gray-500 focus:outline-none font-medium">
@@ -2283,34 +2506,24 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     <!-- min-w-0 em cada coluna: sem isso, itens de grid nao encolhem
                          abaixo do conteudo e os cards vazam para fora da coluna. -->
                     <div id="kanban-view-container" class="hidden grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 h-full pb-6">
-                        <div class="flex flex-col min-w-0 bg-[#202020] border border-[#2f2f2f] rounded p-2.5">
-                            <span class="text-xs font-bold text-gray-400 uppercase tracking-wider pb-2 border-b border-[#2f2f2f] mb-2 flex justify-between gap-2"><span class="truncate">A Fazer</span> <span id="kanban-count-todo" class="font-mono flex-shrink-0">0</span></span>
+                        <div class="flex flex-col min-w-0 bg-[#0a0a0a] border border-[#262626] rounded p-2.5">
+                            <span class="text-xs font-bold text-gray-400 uppercase tracking-wider pb-2 border-b border-[#262626] mb-2 flex justify-between gap-2"><span class="truncate">A Fazer</span> <span id="kanban-count-todo" class="font-mono flex-shrink-0">0</span></span>
                             <div id="kanban-col-todo" class="space-y-2 flex-1 overflow-y-auto overflow-x-hidden min-h-[140px] min-w-0"></div>
                         </div>
-                        <div class="flex flex-col min-w-0 bg-[#202020] border border-[#2f2f2f] rounded p-2.5">
-                            <span class="text-xs font-bold text-sky-400 uppercase tracking-wider pb-2 border-b border-[#2f2f2f] mb-2 flex justify-between gap-2"><span class="truncate">Em Execução</span> <span id="kanban-count-progress" class="font-mono flex-shrink-0">0</span></span>
+                        <div class="flex flex-col min-w-0 bg-[#0a0a0a] border border-[#262626] rounded p-2.5">
+                            <span class="text-xs font-bold text-sky-400 uppercase tracking-wider pb-2 border-b border-[#262626] mb-2 flex justify-between gap-2"><span class="truncate">Em Execução</span> <span id="kanban-count-progress" class="font-mono flex-shrink-0">0</span></span>
                             <div id="kanban-col-progress" class="space-y-2 flex-1 overflow-y-auto overflow-x-hidden min-h-[140px] min-w-0"></div>
                         </div>
-                        <div class="flex flex-col min-w-0 bg-[#202020] border border-[#2f2f2f] rounded p-2.5">
-                            <span class="text-xs font-bold text-amber-400 uppercase tracking-wider pb-2 border-b border-[#2f2f2f] mb-2 flex justify-between gap-2"><span class="truncate">Quase Pronto</span> <span id="kanban-count-review" class="font-mono flex-shrink-0">0</span></span>
+                        <div class="flex flex-col min-w-0 bg-[#0a0a0a] border border-[#262626] rounded p-2.5">
+                            <span class="text-xs font-bold text-amber-400 uppercase tracking-wider pb-2 border-b border-[#262626] mb-2 flex justify-between gap-2"><span class="truncate">Quase Pronto</span> <span id="kanban-count-review" class="font-mono flex-shrink-0">0</span></span>
                             <div id="kanban-col-review" class="space-y-2 flex-1 overflow-y-auto overflow-x-hidden min-h-[140px] min-w-0"></div>
                         </div>
-                        <div class="flex flex-col min-w-0 bg-[#202020] border border-[#2f2f2f] rounded p-2.5">
-                            <span class="text-xs font-bold text-emerald-400 uppercase tracking-wider pb-2 border-b border-[#2f2f2f] mb-2 flex justify-between gap-2"><span class="truncate">Concluído</span> <span id="kanban-count-done" class="font-mono flex-shrink-0">0</span></span>
+                        <div class="flex flex-col min-w-0 bg-[#0a0a0a] border border-[#262626] rounded p-2.5">
+                            <span class="text-xs font-bold text-emerald-400 uppercase tracking-wider pb-2 border-b border-[#262626] mb-2 flex justify-between gap-2"><span class="truncate">Concluído</span> <span id="kanban-count-done" class="font-mono flex-shrink-0">0</span></span>
                             <div id="kanban-col-done" class="space-y-2 flex-1 overflow-y-auto overflow-x-hidden min-h-[140px] min-w-0"></div>
                         </div>
                     </div>
 
-                    <div id="charts-view-container" class="hidden grid grid-cols-1 md:grid-cols-2 gap-4 p-2">
-                        <div class="bg-[#202020] border border-[#2f2f2f] rounded p-4">
-                            <h4 class="text-xs font-bold text-gray-200 mb-3">Tarefas por Categoria</h4>
-                            <canvas id="chartCategories" height="200"></canvas>
-                        </div>
-                        <div class="bg-[#202020] border border-[#2f2f2f] rounded p-4">
-                            <h4 class="text-xs font-bold text-gray-200 mb-3">Tarefas por Prioridade</h4>
-                            <canvas id="chartPriorities" height="200"></canvas>
-                        </div>
-                    </div>
                 </div>
             </div>
 
@@ -2318,8 +2531,8 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             <!-- Antes era flex-shrink-0 com 384px fixos: numa janela pequena ele
                  tomava o espaço todo e sobrava quase nada para a lista. Agora
                  cede largura até 264px antes de a lista ficar apertada. -->
-            <div id="taskDetailDrawer" class="max-w-full h-full bg-[#202020] border-l border-[#2f2f2f] flex flex-col z-30 transition-all duration-200 hidden" style="flex:0 1 384px; min-width:264px">
-                <div class="p-3.5 border-b border-[#2f2f2f] flex items-center justify-between">
+            <div id="taskDetailDrawer" class="max-w-full h-full bg-[#0a0a0a] border-l border-[#262626] flex flex-col z-30 transition-all duration-200 hidden" style="flex:0 1 384px; min-width:264px">
+                <div class="p-3.5 border-b border-[#262626] flex items-center justify-between">
                     <span class="text-xs font-bold text-[#8a8a8e] uppercase tracking-wider">Detalhes da Tarefa</span>
                     <button onclick="closeTaskDetailDrawer()" class="notion-btn p-1 rounded text-gray-400 hover:text-white cursor-pointer"><i class="fa-solid fa-xmark text-xs"></i></button>
                 </div>
@@ -2333,18 +2546,18 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     <div class="grid grid-cols-2 gap-2.5">
                         <div>
                             <label class="text-[11px] font-bold text-gray-500 uppercase block mb-1">Categoria</label>
-                            <select id="detailTaskCategory" onchange="updateTaskFromDrawer()" class="w-full p-1.5 bg-[#181818] border border-[#2f2f2f] rounded text-xs text-gray-200 focus:outline-none"></select>
+                            <select id="detailTaskCategory" onchange="updateTaskFromDrawer()" class="w-full p-1.5 bg-[#050505] border border-[#262626] rounded text-xs text-gray-200 focus:outline-none"></select>
                         </div>
                         <div>
                             <label class="text-[11px] font-bold text-gray-500 uppercase block mb-1">Projeto</label>
-                            <select id="detailTaskProject" onchange="updateTaskFromDrawer()" class="w-full p-1.5 bg-[#181818] border border-[#2f2f2f] rounded text-xs text-gray-200 focus:outline-none"></select>
+                            <select id="detailTaskProject" onchange="updateTaskFromDrawer()" class="w-full p-1.5 bg-[#050505] border border-[#262626] rounded text-xs text-gray-200 focus:outline-none"></select>
                         </div>
                     </div>
 
                     <div class="grid grid-cols-2 gap-2.5">
                         <div>
                             <label class="text-[11px] font-bold text-gray-500 uppercase block mb-1">Prioridade</label>
-                            <select id="detailTaskPriority" onchange="updateTaskFromDrawer()" class="w-full p-1.5 bg-[#181818] border border-[#2f2f2f] rounded text-xs text-gray-200 focus:outline-none">
+                            <select id="detailTaskPriority" onchange="updateTaskFromDrawer()" class="w-full p-1.5 bg-[#050505] border border-[#262626] rounded text-xs text-gray-200 focus:outline-none">
                                 <option value="Baixa">Baixa</option>
                                 <option value="Média">Média</option>
                                 <option value="Alta">Alta</option>
@@ -2353,14 +2566,14 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                         </div>
                         <div>
                             <label class="text-[11px] font-bold text-gray-500 uppercase block mb-1">Data Limite</label>
-                            <input type="date" id="detailTaskDueDate" onchange="updateTaskFromDrawer()" class="w-full p-1.5 bg-[#181818] border border-[#2f2f2f] rounded text-xs text-gray-200 focus:outline-none">
+                            <input type="date" id="detailTaskDueDate" onchange="updateTaskFromDrawer()" class="w-full p-1.5 bg-[#050505] border border-[#262626] rounded text-xs text-gray-200 focus:outline-none">
                         </div>
                     </div>
 
                     <!-- MEU DIA -->
                     <div>
                         <span class="text-[11px] font-bold text-gray-400 uppercase mb-1 block">Meu Dia</span>
-                        <button id="detailMyDayBtn" onclick="toggleMyDayFromDrawer()" class="w-full flex items-center justify-between gap-2 p-2 bg-[#181818] border border-[#2f2f2f] rounded text-xs transition cursor-pointer hover:border-amber-500/40">
+                        <button id="detailMyDayBtn" onclick="toggleMyDayFromDrawer()" class="w-full flex items-center justify-between gap-2 p-2 bg-[#050505] border border-[#262626] rounded text-xs transition cursor-pointer hover:border-amber-500/40">
                             <span class="flex items-center gap-2 min-w-0">
                                 <i id="detailMyDayIcon" class="fa-regular fa-sun text-amber-400 flex-shrink-0"></i>
                                 <span id="detailMyDayLabel" class="truncate text-gray-300">Não está no Meu Dia</span>
@@ -2372,15 +2585,15 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     <div>
                         <div class="flex justify-between text-[11px] font-bold text-gray-400 uppercase mb-1">
                             <span>Progresso (%)</span>
-                            <span id="detailProgressLabel" class="font-mono text-[#2eaadc]">0%</span>
+                            <span id="detailProgressLabel" class="font-mono text-[#4272c4]">0%</span>
                         </div>
-                        <input type="range" id="detailTaskProgress" min="0" max="100" step="5" oninput="updateProgressFromDrawer(this.value)" class="w-full accent-[#2eaadc] cursor-pointer">
+                        <input type="range" id="detailTaskProgress" min="0" max="100" step="5" oninput="updateProgressFromDrawer(this.value)" class="w-full accent-[#4272c4] cursor-pointer">
                     </div>
 
-                    <div class="pt-2 border-t border-[#2f2f2f]">
+                    <div class="pt-2 border-t border-[#262626]">
                         <div class="flex items-center justify-between mb-1.5">
                             <span class="text-[11px] font-bold text-gray-400 uppercase">Etapas (Checklist)</span>
-                            <span id="detailStepsProgress" class="text-[11px] font-mono text-[#2eaadc]">0/0</span>
+                            <span id="detailStepsProgress" class="text-[11px] font-mono text-[#4272c4]">0/0</span>
                         </div>
                         <div id="detailStepsContainer" class="space-y-1.5 mb-2"></div>
                         <div class="flex gap-2">
@@ -2389,11 +2602,11 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                         </div>
                     </div>
 
-                    <div class="pt-2 border-t border-[#2f2f2f]">
+                    <div class="pt-2 border-t border-[#262626]">
                         <div class="flex items-center justify-between mb-1.5">
                             <span class="text-[11px] font-bold text-gray-400 uppercase flex items-center gap-2">
                                 Anexos de Arquivos
-                                <span id="detailAttachmentsCount" class="font-mono text-[#2eaadc] normal-case">0</span>
+                                <span id="detailAttachmentsCount" class="font-mono text-[#4272c4] normal-case">0</span>
                             </span>
                             <button onclick="pickAttachmentForTask()" class="notion-btn px-2 py-1 rounded text-xs text-sky-300 hover:text-white cursor-pointer flex items-center gap-1">
                                 <i class="fa-solid fa-paperclip"></i> Anexar
@@ -2402,12 +2615,12 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                         <div id="detailAttachmentsContainer" class="space-y-1"></div>
                     </div>
 
-                    <div class="pt-2 border-t border-[#2f2f2f]">
+                    <div class="pt-2 border-t border-[#262626]">
                         <label class="text-[11px] font-bold text-gray-500 uppercase block mb-1">Anotações</label>
                         <textarea id="detailTaskNotes" oninput="debouncedUpdateTaskNotes()" rows="4" placeholder="Adicionar notas para esta tarefa..." class="w-full p-2 bg-white/5 border border-transparent focus:border-white/20 rounded text-xs text-gray-200 focus:outline-none resize-none"></textarea>
                     </div>
 
-                    <div class="pt-3 border-t border-[#2f2f2f] flex justify-between items-center">
+                    <div class="pt-3 border-t border-[#262626] flex justify-between items-center">
                         <button onclick="deleteCurrentTaskFromDrawer()" class="notion-btn px-2.5 py-1.5 rounded text-xs text-rose-400 hover:bg-rose-500/10 cursor-pointer flex items-center gap-1.5">
                             <i class="fa-regular fa-trash-can"></i> Excluir Tarefa
                         </button>
@@ -2418,40 +2631,47 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         </main>
 
         <!-- MAIN VAULT NOTES WORKSPACE -->
-        <main id="main-notepad-view" class="flex-1 flex h-full overflow-hidden bg-[#191919] relative hidden min-w-0">
+        <main id="main-notepad-view" class="flex-1 flex h-full overflow-hidden bg-[#000000] relative hidden min-w-0">
             <div id="note-editor-container" class="flex-1 flex flex-col h-full overflow-hidden">
                 
                 <!-- FORMATTING TOOLBAR WITH CLEAR FORMATTING -->
-                <div class="p-3 border-b border-[#2f2f2f] flex items-center justify-between gap-2 flex-wrap flex-shrink-0 bg-[#202020]">
-                    <div class="flex items-center gap-2 flex-1 min-w-0">
+                <div class="note-toolbar border-b border-[#262626] flex-shrink-0 bg-[#0a0a0a]">
+                    <div class="nt-title">
                         <button onclick="openNoteIconModal()" id="btn-current-note-icon" class="p-1.5 rounded bg-white/5 hover:bg-white/10 text-sky-400 cursor-pointer" title="Personalizar Ícone da Nota">
                             <i class="fa-regular fa-file-lines text-sm"></i>
                         </button>
-                        <input type="text" id="noteTitleInput" oninput="saveNoteTitleLive()" class="bg-transparent text-lg font-bold text-white placeholder-gray-600 focus:outline-none flex-1 truncate" placeholder="Título da Nota">
+                        <input type="text" id="noteTitleInput" oninput="saveNoteTitleLive()" class="bg-transparent text-lg font-bold text-white placeholder-gray-600 focus:outline-none flex-1 min-w-0 truncate" placeholder="Título da Nota">
                     </div>
                     
-                    <div class="flex items-center gap-1 bg-white/5 border border-white/5 p-1 rounded text-xs flex-wrap">
+                    <div class="nt-format flex items-center gap-1 bg-white/5 border border-white/5 p-1 rounded text-xs flex-wrap">
                         <button onclick="formatDoc('bold')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Negrito"><i class="fa-solid fa-bold"></i></button>
                         <button onclick="formatDoc('italic')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Itálico"><i class="fa-solid fa-italic"></i></button>
                         <button onclick="formatDoc('underline')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Sublinhado"><i class="fa-solid fa-underline"></i></button>
                         <button onclick="formatDoc('strikeThrough')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Tachado"><i class="fa-solid fa-strikethrough"></i></button>
-                        <div class="h-4 w-px bg-[#2f2f2f] mx-0.5"></div>
+                        <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
                         <button onclick="formatDoc('formatBlock', '<h1>')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white font-bold" title="H1">H1</button>
                         <button onclick="formatDoc('formatBlock', '<h2>')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white font-bold" title="H2">H2</button>
-                        <div class="h-4 w-px bg-[#2f2f2f] mx-0.5"></div>
+                        <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
                         <button onclick="formatDoc('insertUnorderedList')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Lista Marcadores"><i class="fa-solid fa-list-ul"></i></button>
                         <button onclick="formatDoc('insertOrderedList')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Lista Numerada"><i class="fa-solid fa-list-ol"></i></button>
-                        <div class="h-4 w-px bg-[#2f2f2f] mx-0.5"></div>
-                        <button onclick="formatDoc('foreColor', '#2eaadc')" class="notion-btn px-2 py-1 rounded text-sky-400 hover:text-white" title="Cor Azul"><i class="fa-solid fa-palette"></i></button>
+                        <button onclick="formatDoc('insertHorizontalRule')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Divisor (linha de separação)"><i class="fa-solid fa-minus"></i></button>
+                        <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
+                        <button onclick="formatDoc('foreColor', '#4272c4')" class="notion-btn px-2 py-1 rounded text-sky-400 hover:text-white" title="Cor Azul"><i class="fa-solid fa-palette"></i></button>
                         <button onclick="formatDoc('hiliteColor', '#4a441e')" class="notion-btn px-2 py-1 rounded text-amber-300 hover:text-white" title="Marca-texto"><i class="fa-solid fa-highlighter"></i></button>
-                        <div class="h-4 w-px bg-[#2f2f2f] mx-0.5"></div>
+                        <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
+                        <button onclick="insertTaskBlock()" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Inserir quadro de tarefas nesta página"><i class="fa-solid fa-list-check"></i></button>
+                        <button onclick="taskFromSelection()" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Criar tarefa a partir do texto selecionado"><i class="fa-regular fa-square-check"></i></button>
+                        <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
                         <!-- BUTTON: LIMPAR FORMATAÇÃO -->
-                        <button onclick="formatDoc('removeFormat')" class="notion-btn px-2 py-1 rounded text-rose-400 hover:text-rose-300 font-medium cursor-pointer" title="Limpar Formatação">
+                        <button onclick="limparFormatacao()" class="notion-btn px-2 py-1 rounded text-rose-400 hover:text-rose-300 font-medium cursor-pointer" title="Limpar Formatação">
                             <i class="fa-solid fa-eraser mr-1"></i> Limpar Formatação
                         </button>
                     </div>
 
-                    <div class="flex items-center gap-1.5">
+                    <div class="nt-actions flex items-center gap-1.5">
+                        <button onclick="splitPane()" class="notion-btn px-2 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1 cursor-pointer" title="Dividir a tela (Split View): abre outro painel ao lado">
+                            <i class="fa-solid fa-table-columns text-xs"></i> Dividir
+                        </button>
                         <button onclick="addChildNote(selectedNoteId)" class="notion-btn px-2 py-1 rounded text-xs text-sky-400 hover:text-white flex items-center gap-1 cursor-pointer" title="Criar Subnota">
                             <i class="fa-solid fa-code-branch text-xs"></i> Subnota
                         </button>
@@ -2461,9 +2681,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     </div>
                 </div>
 
-                <div id="noteEditorBody" contenteditable="true" oninput="saveNoteContentLive()" placeholder="Comece a digitar sua anotação no Vault aqui..." class="flex-1 p-8 overflow-y-auto text-sm text-gray-200 focus:outline-none min-h-0 leading-relaxed font-sans bg-[#191919]"></div>
+                <div id="editor-panes" class="flex-1 flex min-h-0 overflow-hidden bg-black"></div>
 
-                <div class="h-7 border-t border-[#2f2f2f] px-6 flex items-center justify-between text-xs text-gray-500 font-mono flex-shrink-0 bg-[#202020]">
+                <div class="h-7 border-t border-[#262626] px-6 flex items-center justify-between text-xs text-gray-500 font-mono flex-shrink-0 bg-[#0a0a0a]">
                     <span id="note-word-count">0 palavras • 0 caracteres</span>
                     <span id="note-last-saved">Salvo no Vault local</span>
                 </div>
@@ -2473,7 +2693,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
     <!-- PROFILE MODAL -->
     <div id="profileModal" class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 hidden">
-        <div class="bg-[#202020] border border-[#2f2f2f] rounded-lg p-5 w-full max-w-sm space-y-4 shadow-2xl">
+        <div class="bg-[#0a0a0a] border border-[#262626] rounded-lg p-5 w-full max-w-sm space-y-4 shadow-2xl">
             <h3 class="text-sm font-bold text-white">Editar Perfil</h3>
 
             <div class="flex flex-col items-center justify-center gap-2 pb-1">
@@ -2508,7 +2728,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 </div>
             </div>
             <!-- Conta conectada + saída -->
-            <div id="profileAccountBox" class="hidden pt-3 border-t border-[#2f2f2f] space-y-2">
+            <div id="profileAccountBox" class="hidden pt-3 border-t border-[#262626] space-y-2">
                 <div class="flex items-center gap-2 text-[11px] text-gray-400">
                     <i class="fa-solid fa-circle-check text-emerald-400"></i>
                     <span class="truncate">Conectado como <span id="profileAccountEmail" class="text-gray-200 font-medium"></span></span>
@@ -2523,14 +2743,14 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
             <div class="flex justify-end gap-2 pt-2">
                 <button onclick="closeProfileModal()" class="notion-btn px-3 py-1.5 rounded text-xs text-gray-400 hover:text-white cursor-pointer">Cancelar</button>
-                <button onclick="saveProfile()" class="px-3.5 py-1.5 rounded text-xs bg-[#2eaadc] hover:bg-sky-500 text-white font-bold cursor-pointer transition">Salvar</button>
+                <button onclick="saveProfile()" class="px-3.5 py-1.5 rounded text-xs bg-[#4272c4] hover:bg-sky-500 text-white font-bold cursor-pointer transition">Salvar</button>
             </div>
         </div>
     </div>
 
     <!-- CATEGORY MODAL -->
     <div id="categoryModal" class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 hidden">
-        <div class="bg-[#202020] border border-[#2f2f2f] rounded-lg p-5 w-full max-w-sm space-y-4 shadow-2xl">
+        <div class="bg-[#0a0a0a] border border-[#262626] rounded-lg p-5 w-full max-w-sm space-y-4 shadow-2xl">
             <h3 id="categoryModalTitle" class="text-sm font-bold text-white">Categoria</h3>
             <input type="hidden" id="editingCategoryId">
             <div class="space-y-3 text-xs">
@@ -2547,7 +2767,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <button id="deleteCatBtn" onclick="deleteCurrentEditingCategory()" class="hidden px-2.5 py-1 rounded text-xs text-rose-400 hover:bg-rose-500/10 cursor-pointer">Excluir</button>
                 <div class="flex gap-2 ml-auto">
                     <button onclick="closeCategoryModal()" class="notion-btn px-3 py-1.5 rounded text-xs text-gray-400 hover:text-white cursor-pointer">Cancelar</button>
-                    <button onclick="saveCategoryModal()" class="px-3.5 py-1.5 rounded text-xs bg-[#2eaadc] hover:bg-sky-500 text-white font-bold cursor-pointer transition">Salvar</button>
+                    <button onclick="saveCategoryModal()" class="px-3.5 py-1.5 rounded text-xs bg-[#4272c4] hover:bg-sky-500 text-white font-bold cursor-pointer transition">Salvar</button>
                 </div>
             </div>
         </div>
@@ -2555,7 +2775,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
     <!-- PROJECT MODAL -->
     <div id="projectModal" class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 hidden">
-        <div class="bg-[#202020] border border-[#2f2f2f] rounded-lg p-5 w-full max-w-sm space-y-4 shadow-2xl">
+        <div class="bg-[#0a0a0a] border border-[#262626] rounded-lg p-5 w-full max-w-sm space-y-4 shadow-2xl">
             <h3 id="projectModalTitle" class="text-sm font-bold text-white">Projeto</h3>
             <input type="hidden" id="editingProjectId">
             <div class="space-y-3 text-xs">
@@ -2572,7 +2792,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <button id="deleteProjBtn" onclick="deleteCurrentEditingProject()" class="hidden px-2.5 py-1 rounded text-xs text-rose-400 hover:bg-rose-500/10 cursor-pointer">Excluir</button>
                 <div class="flex gap-2 ml-auto">
                     <button onclick="closeProjectModal()" class="notion-btn px-3 py-1.5 rounded text-xs text-gray-400 hover:text-white cursor-pointer">Cancelar</button>
-                    <button onclick="saveProjectModal()" class="px-3.5 py-1.5 rounded text-xs bg-[#2eaadc] hover:bg-sky-500 text-white font-bold cursor-pointer transition">Salvar</button>
+                    <button onclick="saveProjectModal()" class="px-3.5 py-1.5 rounded text-xs bg-[#4272c4] hover:bg-sky-500 text-white font-bold cursor-pointer transition">Salvar</button>
                 </div>
             </div>
         </div>
@@ -2580,23 +2800,27 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
     <!-- NOTE ICON CUSTOMIZATION MODAL -->
     <div id="noteIconModal" class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 hidden">
-        <div class="bg-[#202020] border border-[#2f2f2f] rounded-lg p-5 w-full max-w-sm space-y-4 shadow-2xl">
+        <div class="bg-[#0a0a0a] border border-[#262626] rounded-lg p-5 w-full max-w-sm space-y-4 shadow-2xl">
             <h3 class="text-sm font-bold text-white">Personalizar Ícone da Nota</h3>
             <div class="space-y-3 text-xs">
                 <div>
                     <label class="text-gray-400 uppercase font-bold block mb-1">Escolher Ícone</label>
                     <div id="noteIconPickerContainer" class="grid grid-cols-6 gap-1.5 p-2 bg-white/5 rounded max-h-36 overflow-y-auto"></div>
                 </div>
+                <div>
+                    <label class="text-gray-400 uppercase font-bold block mb-1">Cor do Ícone</label>
+                    <div id="noteIconColorPicker" class="flex flex-wrap gap-2 p-2 bg-white/5 rounded"></div>
+                </div>
             </div>
             <div class="flex justify-end gap-2 pt-2">
                 <button onclick="closeNoteIconModal()" class="notion-btn px-3 py-1.5 rounded text-xs text-gray-400 hover:text-white cursor-pointer">Cancelar</button>
-                <button onclick="saveNoteIconModal()" class="px-3.5 py-1.5 rounded text-xs bg-[#2eaadc] hover:bg-sky-500 text-white font-bold cursor-pointer transition">Salvar Ícone</button>
+                <button onclick="saveNoteIconModal()" class="px-3.5 py-1.5 rounded text-xs bg-[#4272c4] hover:bg-sky-500 text-white font-bold cursor-pointer transition">Salvar Ícone</button>
             </div>
         </div>
     </div>
 
     <!-- ================= TELA DE ENTRADA ================= -->
-    <div id="loginGate" class="fixed inset-0 z-[60] bg-[#191919] hidden items-center justify-center p-6">
+    <div id="loginGate" class="fixed inset-0 z-[60] bg-[#000000] hidden items-center justify-center p-6">
         <div class="w-full max-w-sm">
             <div class="flex items-center gap-3 mb-6 justify-center">
                 <div class="w-10 h-10 flex items-center justify-center flex-shrink-0">
@@ -2608,16 +2832,16 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 </div>
             </div>
 
-            <div class="bg-[#202020] border border-[#2f2f2f] rounded p-5 space-y-3">
+            <div class="bg-[#0a0a0a] border border-[#262626] rounded p-5 space-y-3">
                 <input type="email" id="gateEmail" placeholder="seu@email.com" autocomplete="username"
-                       class="w-full p-2.5 bg-[#181818] border border-[#2f2f2f] rounded text-xs text-gray-200 focus:outline-none focus:border-[#2eaadc]/60">
+                       class="w-full p-2.5 bg-[#050505] border border-[#262626] rounded text-xs text-gray-200 focus:outline-none focus:border-[#4272c4]/60">
                 <input type="password" id="gatePassword" placeholder="Senha (mínimo 6 caracteres)" autocomplete="current-password"
-                       class="w-full p-2.5 bg-[#181818] border border-[#2f2f2f] rounded text-xs text-gray-200 focus:outline-none focus:border-[#2eaadc]/60">
+                       class="w-full p-2.5 bg-[#050505] border border-[#262626] rounded text-xs text-gray-200 focus:outline-none focus:border-[#4272c4]/60">
 
                 <div id="gateError" class="hidden text-[11px] text-rose-300 bg-rose-500/10 border border-rose-500/25 rounded p-2"></div>
 
                 <button id="gateSignIn" onclick="gateEntrar()"
-                        class="w-full px-3 py-2.5 rounded text-xs font-bold bg-[#2eaadc] hover:bg-sky-500 text-white cursor-pointer transition">
+                        class="w-full px-3 py-2.5 rounded text-xs font-bold bg-[#4272c4] hover:bg-sky-500 text-white cursor-pointer transition">
                     Entrar
                 </button>
                 <button id="gateSignUp" onclick="gateCriarConta()"
@@ -2639,28 +2863,28 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
     <!-- ================= NUVEM / CONTA ================= -->
     <div id="cloudModal" class="fixed inset-0 bg-black/70 z-50 hidden items-center justify-center p-4">
-        <div class="bg-[#202020] border border-[#2f2f2f] rounded w-full max-w-lg max-h-[92vh] overflow-y-auto">
-            <div class="p-4 border-b border-[#2f2f2f] flex items-center justify-between">
+        <div class="bg-[#0a0a0a] border border-[#262626] rounded w-full max-w-lg max-h-[92vh] overflow-y-auto">
+            <div class="p-4 border-b border-[#262626] flex items-center justify-between">
                 <span class="text-sm font-bold text-white flex items-center gap-2">
-                    <i class="fa-solid fa-cloud text-[#2eaadc]"></i> Sincronização na Nuvem
+                    <i class="fa-solid fa-cloud text-[#4272c4]"></i> Sincronização na Nuvem
                 </span>
                 <button onclick="closeCloudModal()" class="text-gray-500 hover:text-white cursor-pointer"><i class="fa-solid fa-xmark"></i></button>
             </div>
 
             <div class="p-4 space-y-4">
                 <!-- Estado atual -->
-                <div id="cloudStatusBox" class="p-3 rounded border border-[#2f2f2f] bg-[#191919] text-xs text-gray-400">
+                <div id="cloudStatusBox" class="p-3 rounded border border-[#262626] bg-[#000000] text-xs text-gray-400">
                     Carregando...
                 </div>
 
                 <!-- Conta -->
-                <div id="cloudAuthSection" class="space-y-2 pt-2 border-t border-[#2f2f2f]">
+                <div id="cloudAuthSection" class="space-y-2 pt-2 border-t border-[#262626]">
                     <span class="text-[11px] font-bold text-gray-400 uppercase">Sua conta</span>
                     <div id="cloudLoginForm" class="space-y-2">
-                        <input type="email" id="cloudEmail" placeholder="seu@email.com" class="w-full p-2 bg-[#181818] border border-[#2f2f2f] rounded text-xs text-gray-200 focus:outline-none focus:border-[#2eaadc]/50">
-                        <input type="password" id="cloudPassword" placeholder="Senha (mínimo 6 caracteres)" class="w-full p-2 bg-[#181818] border border-[#2f2f2f] rounded text-xs text-gray-200 focus:outline-none focus:border-[#2eaadc]/50">
+                        <input type="email" id="cloudEmail" placeholder="seu@email.com" class="w-full p-2 bg-[#050505] border border-[#262626] rounded text-xs text-gray-200 focus:outline-none focus:border-[#4272c4]/50">
+                        <input type="password" id="cloudPassword" placeholder="Senha (mínimo 6 caracteres)" class="w-full p-2 bg-[#050505] border border-[#262626] rounded text-xs text-gray-200 focus:outline-none focus:border-[#4272c4]/50">
                         <div class="flex items-center gap-2">
-                            <button onclick="entrarNaNuvem()" class="notion-btn flex-1 px-3 py-1.5 rounded text-xs bg-[#2eaadc]/20 border border-[#2eaadc]/40 text-sky-200 hover:bg-[#2eaadc]/30 cursor-pointer">
+                            <button onclick="entrarNaNuvem()" class="notion-btn flex-1 px-3 py-1.5 rounded text-xs bg-[#4272c4]/20 border border-[#4272c4]/40 text-sky-200 hover:bg-[#4272c4]/30 cursor-pointer">
                                 <i class="fa-solid fa-right-to-bracket mr-1"></i> Entrar
                             </button>
                             <button onclick="criarContaNaNuvem()" class="notion-btn flex-1 px-3 py-1.5 rounded text-xs bg-white/5 border border-white/10 text-gray-200 hover:bg-white/10 cursor-pointer">
@@ -2676,7 +2900,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 </div>
 
                 <!-- Passo 3: sincronizar -->
-                <div id="cloudSyncSection" class="space-y-2 pt-2 border-t border-[#2f2f2f]">
+                <div id="cloudSyncSection" class="space-y-2 pt-2 border-t border-[#262626]">
                     <span class="text-[11px] font-bold text-gray-400 uppercase">Sincronizar agora</span>
                     <div class="flex items-center gap-2">
                         <button onclick="enviarParaNuvem()" class="notion-btn flex-1 px-3 py-1.5 rounded text-xs bg-white/5 border border-white/10 text-gray-200 hover:bg-white/10 cursor-pointer" title="Sobrescreve a nuvem com o que está nesta máquina">
@@ -2697,38 +2921,38 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
     <!-- ================= ATUALIZACAO ================= -->
     <div id="updateModal" class="fixed inset-0 bg-black/70 z-[60] hidden items-center justify-center p-4">
-        <div class="bg-[#202020] border border-[#2f2f2f] rounded w-full max-w-lg max-h-[92vh] overflow-y-auto">
-            <div class="p-4 border-b border-[#2f2f2f] flex items-center justify-between">
+        <div class="bg-[#0a0a0a] border border-[#262626] rounded w-full max-w-lg max-h-[92vh] overflow-y-auto">
+            <div class="p-4 border-b border-[#262626] flex items-center justify-between">
                 <span class="text-sm font-bold text-white flex items-center gap-2">
-                    <i class="fa-solid fa-cloud-arrow-down text-[#2eaadc]"></i> Atualizacao do NEXUS
+                    <i class="fa-solid fa-cloud-arrow-down text-[#4272c4]"></i> Atualizacao do NEXUS
                 </span>
                 <button onclick="fecharUpdateModal()" class="text-gray-500 hover:text-white cursor-pointer"><i class="fa-solid fa-xmark"></i></button>
             </div>
 
             <div class="p-4 space-y-4">
-                <div id="updStatusBox" class="p-3 rounded border border-[#2f2f2f] bg-[#191919] text-xs text-gray-400">
+                <div id="updStatusBox" class="p-3 rounded border border-[#262626] bg-[#000000] text-xs text-gray-400">
                     Verificando...
                 </div>
 
                 <div id="updNotesBox" class="hidden">
                     <span class="text-[11px] font-bold text-gray-400 uppercase">O que mudou</span>
-                    <pre id="updNotes" class="mt-1 p-3 rounded border border-[#2f2f2f] bg-[#181818] text-[11px] text-gray-300 whitespace-pre-wrap font-sans leading-relaxed max-h-40 overflow-y-auto"></pre>
+                    <pre id="updNotes" class="mt-1 p-3 rounded border border-[#262626] bg-[#050505] text-[11px] text-gray-300 whitespace-pre-wrap font-sans leading-relaxed max-h-40 overflow-y-auto"></pre>
                 </div>
 
                 <div id="updProgressBox" class="hidden space-y-1.5">
-                    <div class="h-2 w-full rounded bg-[#181818] border border-[#2f2f2f] overflow-hidden">
-                        <div id="updBar" class="h-full bg-[#2eaadc] transition-all duration-300" style="width:0%"></div>
+                    <div class="h-2 w-full rounded bg-[#050505] border border-[#262626] overflow-hidden">
+                        <div id="updBar" class="h-full bg-[#4272c4] transition-all duration-300" style="width:0%"></div>
                     </div>
                     <div class="flex items-center justify-between text-[10px] text-gray-500 font-mono">
                         <span id="updPhase">-</span><span id="updPct">0%</span>
                     </div>
                 </div>
 
-                <div class="flex items-center gap-2 pt-2 border-t border-[#2f2f2f]">
+                <div class="flex items-center gap-2 pt-2 border-t border-[#262626]">
                     <button id="updBtnCheck" onclick="verificarAtualizacao(true)" class="notion-btn flex-1 px-3 py-1.5 rounded text-xs bg-white/5 border border-white/10 text-gray-200 hover:bg-white/10 cursor-pointer">
                         <i class="fa-solid fa-rotate mr-1"></i> Verificar agora
                     </button>
-                    <button id="updBtnInstall" onclick="instalarAtualizacao()" class="notion-btn flex-1 px-3 py-1.5 rounded text-xs bg-[#2eaadc]/20 border border-[#2eaadc]/40 text-sky-200 hover:bg-[#2eaadc]/30 cursor-pointer hidden">
+                    <button id="updBtnInstall" onclick="instalarAtualizacao()" class="notion-btn flex-1 px-3 py-1.5 rounded text-xs bg-[#4272c4]/20 border border-[#4272c4]/40 text-sky-200 hover:bg-[#4272c4]/30 cursor-pointer hidden">
                         <i class="fa-solid fa-download mr-1"></i> Baixar e instalar
                     </button>
                 </div>
@@ -2745,10 +2969,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
     <!-- ================= CENTRAL DE NOTIFICAÇÕES E PRAZOS ================= -->
     <div id="notifModal" class="fixed inset-0 bg-black/70 z-[60] hidden items-center justify-center p-4">
-        <div class="bg-[#202020] border border-[#2f2f2f] rounded w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
-            <div class="p-4 border-b border-[#2f2f2f] flex items-center justify-between bg-[#1e1e1e]">
+        <div class="bg-[#0a0a0a] border border-[#262626] rounded w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
+            <div class="p-4 border-b border-[#262626] flex items-center justify-between bg-[#1e1e1e]">
                 <div class="flex items-center gap-2.5">
-                    <div class="w-8 h-8 rounded bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-[#2eaadc] flex-shrink-0">
+                    <div class="w-8 h-8 rounded bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-[#4272c4] flex-shrink-0">
                         <i class="fa-solid fa-bell text-sm"></i>
                     </div>
                     <div>
@@ -2771,7 +2995,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <!-- Itens renderizados dinamicamente via JS -->
             </div>
 
-            <div class="p-3 border-t border-[#2f2f2f] bg-[#1a1a1a] flex items-center justify-between text-xs text-gray-400">
+            <div class="p-3 border-t border-[#262626] bg-[#1a1a1a] flex items-center justify-between text-xs text-gray-400">
                 <span class="flex items-center gap-1.5 text-[11px]"><i class="fa-brands fa-windows text-sky-400"></i> Notificações Desktop Ativas</span>
                 <button onclick="checkDeadlinesAndNotify(true)" class="text-xs text-sky-400 hover:text-sky-300 hover:underline cursor-pointer flex items-center gap-1">
                     <i class="fa-solid fa-rotate-right text-[10px]"></i> Atualizar agora
@@ -2886,9 +3110,398 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 if (!Array.isArray(t.steps)) t.steps = [];
                 if (!Array.isArray(t.attachments)) t.attachments = [];
                 if (t.isMyDay === undefined) t.isMyDay = true;
+                normalizarDatasDaTarefa(t);
             });
+            state.notepad.forEach(n => { if (n && typeof n.createdAt !== 'string') n.createdAt = new Date().toISOString(); });
 
             // Vault vazio e um estado VALIDO: nao recria a nota de exemplo.
+        }
+
+        /* =====================================================================
+           QUADRO DE TAREFAS NO VAULT
+           A pagina guarda so um marcador <div data-nx-tasks="1">; as tarefas
+           vivem em state.tasks (task.noteId = nota). Assim a mesma tarefa
+           aparece na aba Tarefas e na pagina, sempre sincronizada.
+           ===================================================================== */
+        function _editorDaNota(noteId) {
+            return Array.from(document.querySelectorAll('.note-editor')).find(ed => {
+                const p = ensureLayout().panes[Number(ed.dataset.pane)];
+                return p && p.active === noteId;
+            });
+        }
+        function _notaDoEditor(ed) {
+            const p = ensureLayout().panes[Number(ed.dataset.pane)];
+            return p && p.active;
+        }
+
+        function hidratarQuadroDeTarefas(ed, noteId) {
+            const blocos = ed.querySelectorAll('[data-nx-tasks]');
+            blocos.forEach((b, i) => { if (i > 0) b.remove(); });          // um quadro por pagina
+            const b = blocos[0];
+            if (!b) return;
+            b.classList.add('nx-taskblock');
+            b.setAttribute('contenteditable', 'false');
+            b.dataset.note = noteId;
+            if (!b.querySelector('.nx-tb-list')) {
+                b.innerHTML = `
+                    <div class="nx-tb-head">
+                        <span class="nx-tb-grip" title="Arraste para mover o quadro na página"><i class="fa-solid fa-grip-vertical"></i></span>
+                        <i class="fa-solid fa-list-check"></i><span>Tarefas desta página</span><b class="nx-tb-count"></b>
+                        <span class="nx-tb-mv" data-nx-act="up" title="Mover para cima"><i class="fa-solid fa-chevron-up"></i></span>
+                        <span class="nx-tb-mv" data-nx-act="down" title="Mover para baixo"><i class="fa-solid fa-chevron-down"></i></span>
+                    </div>
+                    <div class="nx-tb-list"></div>
+                    <div class="nx-tb-add">
+                        <input type="text" class="nx-tb-input" placeholder="Nova tarefa... (Enter)" maxlength="300">
+                        <select class="nx-tb-projsel" title="Projeto da nova tarefa"></select>
+                        <button type="button" class="nx-tb-addbtn" data-nx-act="add">Adicionar</button>
+                        <button type="button" class="nx-tb-linkbtn" data-nx-act="search" title="Vincular uma tarefa que já existe"><i class="fa-solid fa-magnifying-glass"></i></button>
+                    </div>
+                    <div class="nx-tb-search" style="display:none">
+                        <input type="text" class="nx-tb-search-input" placeholder="Buscar nas tarefas existentes...">
+                        <div class="nx-tb-results"></div>
+                    </div>`;
+            }
+            renderListaDoQuadro(b);
+        }
+
+        function _chipProjeto(t) {
+            const proj = t.projectId && state.projects.find(p => p.id === t.projectId);
+            return proj
+                ? `<span class="nx-tb-proj" data-nx-act="proj" title="Projeto: ${escapeHtml(proj.name)} (clique para trocar)"><i class="${escapeHtml(proj.icon || 'fa-solid fa-folder-tree')}"></i>${escapeHtml(proj.name)}</span>`
+                : `<span class="nx-tb-proj vazio" data-nx-act="proj" title="Definir projeto">+ projeto</span>`;
+        }
+
+        function _opcoesProjeto(sel) {
+            const atual = sel.value;
+            sel.innerHTML = '<option value="">Sem projeto</option>' +
+                state.projects.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+            sel.value = state.projects.some(p => p.id === atual) ? atual : '';
+        }
+
+        function renderListaDoQuadro(b) {
+            const noteId = b.dataset.note;
+            const lista = state.tasks.filter(t => t.noteId === noteId);
+            const feitas = lista.filter(t => (Number(t.progress) || 0) >= 100).length;
+            const cnt = b.querySelector('.nx-tb-count');
+            if (cnt) cnt.textContent = lista.length ? `${feitas}/${lista.length}` : '';
+            const ps = b.querySelector('.nx-tb-projsel');
+            if (ps && document.activeElement !== ps) _opcoesProjeto(ps);
+            const alvo = b.querySelector('.nx-tb-list');
+            if (!alvo || alvo.querySelector('.nx-tb-edit, .nx-tb-rowproj')) return;   // nao atropela uma edicao em curso
+            alvo.innerHTML = lista.length ? lista.map(t => {
+                const done = (Number(t.progress) || 0) >= 100;
+                return `<div class="nx-tb-row ${done ? 'done' : ''}" data-id="${escapeHtml(t.id)}">
+                    <span class="nx-tb-check" data-nx-act="toggle" title="Concluir / reabrir">${done ? '<i class="fa-solid fa-check"></i>' : ''}</span>
+                    <span class="nx-tb-title" data-nx-act="edit" title="Clique para editar">${escapeHtml(t.title || '')}</span>
+                    ${_chipProjeto(t)}
+                    <span class="nx-tb-act" data-nx-act="edit" title="Editar"><i class="fa-solid fa-pencil"></i></span>
+                    <span class="nx-tb-act" data-nx-act="unlink" title="Remover da página (a tarefa continua na aba Tarefas)"><i class="fa-solid fa-link-slash"></i></span>
+                    <span class="nx-tb-act del" data-nx-act="del" title="Excluir tarefa"><i class="fa-regular fa-trash-can"></i></span>
+                </div>`;
+            }).join('') : '<div class="nx-tb-empty">Nenhuma tarefa ainda.</div>';
+            if (b.querySelector('.nx-tb-search-input') && b.querySelector('.nx-tb-search').style.display !== 'none') _resultadosBusca(b);
+        }
+
+        function atualizarQuadrosDeTarefas() {
+            document.querySelectorAll('.nx-taskblock').forEach(renderListaDoQuadro);
+        }
+
+        function criarTarefaDaNota(noteId, titulo, notas, projectId) {
+            titulo = String(titulo || '').trim().slice(0, 300);
+            if (!titulo) return null;
+            const t = {
+                id: 'task-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+                title: titulo, notes: String(notas || '').trim(), noteId,
+                categoryId: (state.categories[0] && state.categories[0].id) || null,
+                projectId: (projectId && state.projects.some(p => p.id === projectId)) ? projectId : null,
+                priority: 'Média', progress: 0, isStarred: false, isMyDay: false, dueDate: '',
+                steps: [], links: [], attachments: [], createdAt: new Date().toISOString()
+            };
+            state.tasks.unshift(t);
+            saveState(true, true);
+            renderAll();
+            return t;
+        }
+
+        function _garantirQuadro(ed) {
+            let b = ed.querySelector('[data-nx-tasks]');
+            if (!b) {
+                b = document.createElement('div');
+                b.setAttribute('data-nx-tasks', '1');
+                ed.appendChild(b);
+                const p = document.createElement('p'); p.innerHTML = '<br>'; ed.appendChild(p);
+                hidratarQuadroDeTarefas(ed, _notaDoEditor(ed));
+                onPaneInput(Number(ed.dataset.pane));                     // grava o marcador na nota
+            }
+            return ed.querySelector('.nx-taskblock');
+        }
+
+        function insertTaskBlock() {
+            const ed = getFocusedEditor();
+            if (!ed || !_notaDoEditor(ed)) { showToast('Abra uma nota do Vault primeiro.'); return; }
+            const jaTinha = !!ed.querySelector('[data-nx-tasks]');
+            const b = _garantirQuadro(ed);
+            if (!b) return;
+            if (b.scrollIntoView) b.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            const inp = b.querySelector('.nx-tb-input'); if (inp) inp.focus();
+            if (jaTinha) showToast('Esta página já tem um quadro de tarefas.');
+        }
+
+        function _textoSelecionadoNoEditor() {
+            const sel = window.getSelection();
+            if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+            const no = sel.anchorNode && (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement);
+            const ed = no && no.closest && no.closest('.note-editor');
+            if (!ed || no.closest('.nx-taskblock')) return null;
+            const texto = sel.toString().replace(/\u00a0/g, ' ').trim();
+            return texto ? { ed, texto } : null;
+        }
+
+        function taskFromSelection() {
+            const r = _textoSelecionadoNoEditor();
+            if (!r) { showToast('Selecione um trecho de texto na nota primeiro.'); return; }
+            const noteId = _notaDoEditor(r.ed);
+            if (!noteId) return;
+            const linhas = r.texto.split(/\n+/).map(x => x.trim()).filter(Boolean);
+            const t = criarTarefaDaNota(noteId, linhas[0], linhas.slice(1).join('\n'));
+            if (!t) return;
+            _garantirQuadro(r.ed);
+            const fab = document.getElementById('nx-sel-fab'); if (fab) fab.style.display = 'none';
+            showToast('Tarefa criada a partir do texto.');
+        }
+
+        function abrirNotaDaTarefa(noteId) {
+            if (appMode !== 'notepad') switchAppMode('notepad');
+            selectNote(noteId);
+        }
+
+        /* Cliques do quadro (delegados: o conteudo e remontado a cada atualizacao) */
+        document.addEventListener('click', e => {
+            const alvo = e.target.closest && e.target.closest('[data-nx-act]');
+            const b = alvo && alvo.closest('.nx-taskblock');
+            if (!alvo || !b) return;
+            const act = alvo.dataset.nxAct;
+            const row = alvo.closest('.nx-tb-row');
+            const id = row && row.dataset.id;
+            if (act === 'toggle' && id) toggleTaskCompletion(id);
+            else if (act === 'add') _adicionarDoQuadro(b);
+            else if (act === 'del' && id) {
+                if (!confirm('Excluir esta tarefa? Ela também sai da aba Tarefas.')) return;
+                state.tasks = state.tasks.filter(t => t.id !== id);
+                selectedTaskIds.delete(id);
+                if (selectedTaskId === id) selectedTaskId = null;
+                saveState(true, true); renderAll();
+            } else if (act === 'edit' && id) _editarNoQuadro(b, row, id);
+            else if (act === 'unlink' && id) {
+                const t = state.tasks.find(x => x.id === id);
+                if (t) { delete t.noteId; saveState(true, true); renderAll(); showToast('Tarefa removida da página (continua na aba Tarefas).'); }
+            }
+            else if (act === 'proj' && id) _trocarProjeto(row, id);
+            else if (act === 'up' || act === 'down') _moverQuadro(b, act);
+            else if (act === 'search') {
+                const painel = b.querySelector('.nx-tb-search');
+                const abrir = painel.style.display === 'none';
+                painel.style.display = abrir ? 'block' : 'none';
+                if (abrir) { _resultadosBusca(b); const si = b.querySelector('.nx-tb-search-input'); if (si) si.focus(); }
+            }
+            else if (act === 'link') {
+                const t = state.tasks.find(x => x.id === alvo.dataset.id);
+                if (t) { t.noteId = b.dataset.note; saveState(true, true); renderAll(); showToast('Tarefa vinculada a esta página.'); }
+            }
+        });
+
+        function _trocarProjeto(row, id) {
+            const t = state.tasks.find(x => x.id === id);
+            const chip = row.querySelector('.nx-tb-proj');
+            if (!t || !chip) return;
+            const sel = document.createElement('select');
+            sel.className = 'nx-tb-rowproj';
+            sel.innerHTML = '<option value="">Sem projeto</option>' + state.projects.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+            sel.value = t.projectId || '';
+            chip.replaceWith(sel); sel.focus();
+            let feito = false;
+            const fim = salvar => {
+                if (feito) return; feito = true;
+                if (salvar) { t.projectId = sel.value || null; saveState(true, true); }
+                sel.remove(); renderAll();
+            };
+            sel.addEventListener('change', () => fim(true));
+            sel.addEventListener('blur', () => fim(false));
+            sel.addEventListener('keydown', ev => { ev.stopPropagation(); if (ev.key === 'Escape') fim(false); });
+        }
+
+        /* Busca opcional nas tarefas ja existentes (sem acento / sem caixa) */
+        function _norm(x) { return String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+        function _resultadosBusca(b) {
+            const q = _norm((b.querySelector('.nx-tb-search-input') || {}).value);
+            const alvo = b.querySelector('.nx-tb-results');
+            if (!alvo) return;
+            const lista = state.tasks
+                .filter(t => t.noteId !== b.dataset.note && (!q || _norm(t.title).includes(q)))
+                .sort((x, y) => ((Number(x.progress) || 0) >= 100) - ((Number(y.progress) || 0) >= 100))
+                .slice(0, 8);
+            alvo.innerHTML = lista.length ? lista.map(t => {
+                const pj = t.projectId && state.projects.find(p => p.id === t.projectId);
+                const outra = t.noteId && state.notepad.find(n => n.id === t.noteId);
+                return `<div class="nx-tb-res" data-nx-act="link" data-id="${escapeHtml(t.id)}" title="Vincular a esta página">
+                    <i class="fa-solid fa-link"></i><span class="nx-tb-title">${escapeHtml(t.title || '')}</span>
+                    ${pj ? `<span class="nx-tb-proj">${escapeHtml(pj.name)}</span>` : ''}
+                    ${outra ? `<span class="nx-tb-proj vazio" style="opacity:1" title="Hoje está na página: ${escapeHtml(outra.title || '')}">em outra página</span>` : ''}
+                </div>`;
+            }).join('') : '<div class="nx-tb-empty">Nenhuma tarefa encontrada.</div>';
+        }
+        document.addEventListener('input', e => {
+            if (e.target.classList && e.target.classList.contains('nx-tb-search-input')) _resultadosBusca(e.target.closest('.nx-taskblock'));
+        });
+
+        /* Mover o quadro pela pagina: setas (um bloco por clique) ou arrastando o puxador */
+        function _salvarPosicao(ed) { onPaneInput(Number(ed.dataset.pane)); }
+        function _moverQuadro(b, dir) {
+            const ed = b.closest('.note-editor'); if (!ed) return;
+            if (dir === 'up' && b.previousElementSibling) ed.insertBefore(b, b.previousElementSibling);
+            else if (dir === 'down' && b.nextElementSibling) ed.insertBefore(b.nextElementSibling, b);
+            else return;
+            if (b.scrollIntoView) b.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            _salvarPosicao(ed);
+        }
+        document.addEventListener('mousedown', e => {
+            const g = e.target.closest && e.target.closest('.nx-tb-grip');
+            if (!g) return;
+            const b = g.closest('.nx-taskblock'), ed = b && b.closest('.note-editor');
+            if (!b || !ed) return;
+            e.preventDefault();
+            b.classList.add('nx-dragging');
+            const linha = document.createElement('div'); linha.className = 'nx-drop-line'; document.body.appendChild(linha);
+            let ref = null, antes = true;
+            const mover = ev => {
+                const er = ed.getBoundingClientRect();
+                const filhos = Array.from(ed.children).filter(k => k !== b);
+                ref = null; antes = true;
+                for (const k of filhos) {
+                    const r = k.getBoundingClientRect();
+                    if (ev.clientY < r.top + r.height / 2) { ref = k; antes = true; break; }
+                    ref = k; antes = false;
+                }
+                const r = ref ? ref.getBoundingClientRect() : er;
+                linha.style.cssText = `display:block;left:${er.left + 16}px;width:${er.width - 32}px;top:${(antes ? r.top : r.bottom) - 1}px`;
+                if (ev.clientY < er.top + 30) ed.scrollTop -= 14;
+                else if (ev.clientY > er.bottom - 30) ed.scrollTop += 14;
+            };
+            const soltar = () => {
+                document.removeEventListener('mousemove', mover);
+                document.removeEventListener('mouseup', soltar);
+                linha.remove(); b.classList.remove('nx-dragging');
+                if (!ref) return;
+                if (antes) ed.insertBefore(b, ref); else ed.insertBefore(b, ref.nextSibling);
+                _salvarPosicao(ed);
+            };
+            document.addEventListener('mousemove', mover);
+            document.addEventListener('mouseup', soltar);
+        });
+
+        function _adicionarDoQuadro(b) {
+            const inp = b.querySelector('.nx-tb-input');
+            if (!inp || !inp.value.trim()) return;
+            const ps = b.querySelector('.nx-tb-projsel');
+            const t = criarTarefaDaNota(b.dataset.note, inp.value, '', ps ? ps.value : '');
+            if (t) { inp.value = ''; inp.focus(); }
+        }
+
+        function _editarNoQuadro(b, row, id) {
+            const t = state.tasks.find(x => x.id === id);
+            const alvo = row.querySelector('.nx-tb-title');
+            if (!t || !alvo || row.querySelector('.nx-tb-edit')) return;
+            const inp = document.createElement('input');
+            inp.type = 'text'; inp.className = 'nx-tb-edit'; inp.value = t.title || ''; inp.maxLength = 300;
+            alvo.replaceWith(inp); inp.focus(); inp.select();
+            let feito = false;
+            const fim = salvar => {
+                if (feito) return; feito = true;
+                const v = inp.value.trim();
+                if (salvar && v) { t.title = v; saveState(true, true); }
+                inp.remove();
+                renderAll();
+            };
+            inp.addEventListener('keydown', ev => {
+                ev.stopPropagation();
+                if (ev.key === 'Enter') { ev.preventDefault(); fim(true); }
+                else if (ev.key === 'Escape') { ev.preventDefault(); fim(false); }
+            });
+            inp.addEventListener('blur', () => fim(true));
+        }
+
+        // Enter no campo de nova tarefa; teclas dentro do quadro nao vazam para o editor/atalhos
+        document.addEventListener('keydown', e => {
+            if (!(e.target.classList && (e.target.classList.contains('nx-tb-input') || e.target.classList.contains('nx-tb-search-input') || e.target.classList.contains('nx-tb-projsel')))) return;
+            if (!e.target.classList.contains('nx-tb-input')) { e.stopPropagation(); return; }
+            e.stopPropagation();
+            if (e.key === 'Enter') { e.preventDefault(); _adicionarDoQuadro(e.target.closest('.nx-taskblock')); }
+        }, true);
+
+        /* Botao flutuante ao selecionar texto */
+        (function () {
+            const fab = document.createElement('div');
+            fab.id = 'nx-sel-fab';
+            fab.innerHTML = '<i class="fa-regular fa-square-check" style="margin-right:6px"></i>Criar tarefa';
+            fab.addEventListener('mousedown', e => e.preventDefault());      // mantem a selecao
+            fab.addEventListener('click', () => taskFromSelection());
+            document.body.appendChild(fab);
+            let raf = 0;
+            document.addEventListener('selectionchange', () => {
+                cancelAnimationFrame(raf);
+                raf = requestAnimationFrame(() => {
+                    const r = _textoSelecionadoNoEditor();
+                    if (!r) { fab.style.display = 'none'; return; }
+                    const rg = window.getSelection().getRangeAt(0);
+                    const rect = rg.getBoundingClientRect ? rg.getBoundingClientRect() : null;
+                    if (!rect || (!rect.width && !rect.height)) { fab.style.display = 'none'; return; }
+                    fab.style.display = 'block';
+                    const w = fab.offsetWidth;
+                    fab.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, rect.left + rect.width / 2 - w / 2)) + 'px';
+                    fab.style.top = (rect.top > 44 ? rect.top - 36 : rect.bottom + 8) + 'px';
+                });
+            });
+        })();
+
+        /* ---------------- Menu lateral recolhivel ---------------- */
+        function toggleSidebar(forcar) {
+            const a = document.getElementById('nx-sidebar');
+            if (!a) return;
+            const recolher = (forcar === undefined) ? !a.classList.contains('sb-collapsed') : !!forcar;
+            a.classList.toggle('sb-collapsed', recolher);
+            const b = document.getElementById('sb-toggle');
+            if (b) b.title = recolher ? 'Expandir menu' : 'Recolher menu';
+            try { localStorage.setItem('nx-sidebar-collapsed', recolher ? '1' : '0'); } catch (e) { }
+        }
+        try { if (localStorage.getItem('nx-sidebar-collapsed') === '1') toggleSidebar(true); } catch (e) { }
+
+        /* ---------------- Carregamento / feedback ---------------- */
+        const _splashT0 = Date.now();
+        try { document.getElementById('nx-splash-img').src = document.querySelector('header img').src; } catch (e) {}
+        function splashStatus(txt) {
+            const el = document.getElementById('nx-splash-text');
+            if (el) el.textContent = txt;
+        }
+        function splashHide() {
+            const sp = document.getElementById('nx-splash');
+            if (!sp || sp.classList.contains('out')) return;
+            // tempo minimo na tela: evita um "piscar" quando o carregamento e instantaneo
+            setTimeout(() => { sp.classList.add('out'); setTimeout(() => sp.remove(), 500); },
+                Math.max(0, 700 - (Date.now() - _splashT0)));
+        }
+        // Rede de seguranca: nunca deixa o app preso na tela de carregamento.
+        setTimeout(() => splashStatus('Demorando mais que o normal...'), 8000);
+        setTimeout(splashHide, 15000);
+
+        function nxToast(msg) {
+            let box = document.getElementById('nx-toasts');
+            if (!box) { box = document.createElement('div'); box.id = 'nx-toasts'; document.body.appendChild(box); }
+            const t = document.createElement('div'); t.className = 'nx-toast';
+            const ic = document.createElement('i'); ic.className = 'fa-solid fa-circle-check';
+            const tx = document.createElement('span'); tx.textContent = msg;
+            t.append(ic, tx); box.appendChild(t);
+            setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 300); }, 2600);
         }
 
         async function initNativeApp() {
@@ -2925,11 +3538,13 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     renderProfile();
                     renderAll();
                 }
+                splashHide();
                 mostrarAvisoConexao();
                 aguardarPonteEmSegundoPlano();
                 return;
             }
 
+            splashStatus('Conectando à sua conta...');
             // Sem conta conectada, o app abre na tela de entrada em vez de
             // carregar direto — assim o usuário final só precisa de e-mail e senha.
             try {
@@ -2960,7 +3575,6 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                algumas vezes em vez de uma so. */
             try { avisarMigracao(null); } catch (e) { /* cosmetico */ }
             try { setTimeout(checarSegurancaDaConexao, 8000); } catch (e) { }
-            try { instalarSanitizacaoDoEditor(); } catch (e) { }
             try {
                 let tentativas = 0;
                 const t = setInterval(async () => {
@@ -2970,6 +3584,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 }, 3000);
             } catch (e) { /* cosmetico */ }
 
+            splashStatus('Sincronizando seus dados...');
             try {
                 let res = await window.pywebview.api.load_state_from_disk();
 
@@ -3031,6 +3646,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             const el = document.getElementById('db-filepath-text');
             if (!el || !isErro) return;
             el.innerText = texto;
+            el.classList.remove('hidden');
             el.style.color = '#fb7185';
         }
 
@@ -3114,6 +3730,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         }
 
         function finalizeInit(falhou = false, recuperado = false, quarentena = null, nuvem = null) {
+            requestAnimationFrame(splashHide);
             bootFallbackRendered = true;
             sanitizeState();
             renderProfile();
@@ -3263,11 +3880,11 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             if (appMode === 'tasks') {
                 if (currentViewMode === 'list') renderTasksList();
                 else if (currentViewMode === 'kanban') renderKanbanView();
-                else if (currentViewMode === 'charts') renderChartsView();
             } else {
                 renderNotepadTree();
             }
             try { checkDeadlinesAndNotify(false); } catch (e) { }
+            try { atualizarQuadrosDeTarefas(); } catch (e) { }
         }
 
         /* O avatar não vive mais dentro de state (nem do tasks_db.json).
@@ -3283,15 +3900,24 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             return null;
         }
 
+        /* Nome exibido: o que a conta definiu; senao a parte do e-mail antes do @;
+           senao "Usuario". NUNCA um nome fixo no codigo - antes, toda conta sem
+           nome aparecia como "Caio / DEV". */
+        function nomeDoPerfil() {
+            const p = state.userProfile || {};
+            const nome = (p.name || '').trim();
+            if (nome) return nome;
+            const email = (typeof cloudInfo !== 'undefined' && cloudInfo && cloudInfo.email) || '';
+            const local = String(email).split('@')[0].trim();
+            return local || 'Usuário';
+        }
+
         function renderProfile() {
             const p = state.userProfile || {};
-            const nameEl = document.getElementById('profile-name');
-            const subEl = document.getElementById('profile-subtitle');
             const initEl = document.getElementById('profile-initials-sidebar');
             const imgEl = document.getElementById('profile-avatar-img');
-
-            if (nameEl) nameEl.innerText = p.name || "Caio";
-            if (subEl) subEl.innerText = p.subtitle || "DEV";
+            const btn = document.getElementById('header-profile-btn');
+            if (btn) btn.title = 'Perfil: ' + nomeDoPerfil() + (p.subtitle ? ' · ' + p.subtitle : '');
 
             const avatarSrc = getAvatarSrc();
             if (avatarSrc && imgEl) {
@@ -3302,7 +3928,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 if (imgEl) imgEl.classList.add('hidden');
                 if (initEl) {
                     initEl.classList.remove('hidden');
-                    const parts = (p.name || "CA").trim().split(' ');
+                    const parts = nomeDoPerfil().split(' ');
                     initEl.innerText = parts.length > 1 ? (parts[0][0] + parts[1][0]).toUpperCase() : (parts[0].slice(0, 2)).toUpperCase();
                 }
             }
@@ -3310,8 +3936,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
         function openProfileModal() {
             const p = state.userProfile || {};
-            document.getElementById('profileNameInput').value = p.name || 'Caio';
-            document.getElementById('profileSubtitleInput').value = p.subtitle || 'DEV';
+            document.getElementById('profileNameInput').value = p.name || '';
+            document.getElementById('profileNameInput').placeholder = nomeDoPerfil();
+            document.getElementById('profileSubtitleInput').value = p.subtitle || '';
             tempProfileAvatar = getAvatarSrc();
             updateModalAvatarPreview();
             const box = document.getElementById('profileAccountBox');
@@ -3373,7 +4000,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         }
 
         function updateModalAvatarPreview() {
-            const name = document.getElementById('profileNameInput').value || 'Caio';
+            const name = document.getElementById('profileNameInput').value || nomeDoPerfil();
             const initialsEl = document.getElementById('modalAvatarInitials');
             const imgEl = document.getElementById('modalAvatarPreview');
             const removeBtn = document.getElementById('removeAvatarBtn');
@@ -3397,8 +4024,8 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         
         function saveProfile() {
             if (!state.userProfile) state.userProfile = {};
-            state.userProfile.name = document.getElementById('profileNameInput').value.trim() || 'Caio';
-            state.userProfile.subtitle = document.getElementById('profileSubtitleInput').value.trim() || 'DEV';
+            state.userProfile.name = document.getElementById('profileNameInput').value.trim();
+            state.userProfile.subtitle = document.getElementById('profileSubtitleInput').value.trim();
 
             if (tempProfileAvatar) {
                 // Vai embutido só nesta gravação; o Python move para avatar.dat.
@@ -3429,20 +4056,21 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             const mainNotepad = document.getElementById('main-notepad-view');
 
             if (mode === 'tasks') {
-                btnTasks.className = "py-1.5 rounded flex items-center justify-center gap-1.5 bg-[#2a2a2a] text-white border border-white/10 transition cursor-pointer";
-                btnNotepad.className = "py-1.5 rounded flex items-center justify-center gap-1.5 text-gray-400 hover:text-white transition cursor-pointer";
+                btnTasks.className = "seg-tab flex items-center justify-center gap-2 bg-[#161616] text-white border border-white/10 transition cursor-pointer";
+                btnNotepad.className = "seg-tab flex items-center justify-center gap-2 text-gray-400 hover:text-white transition cursor-pointer";
                 sideTasks.classList.remove('hidden');
                 sideNotepad.classList.add('hidden');
                 mainTasks.classList.remove('hidden');
                 mainNotepad.classList.add('hidden');
                 renderTasksList();
             } else {
-                btnNotepad.className = "py-1.5 rounded flex items-center justify-center gap-1.5 bg-[#2a2a2a] text-white border border-white/10 transition cursor-pointer";
-                btnTasks.className = "py-1.5 rounded flex items-center justify-center gap-1.5 text-gray-400 hover:text-white transition cursor-pointer";
+                btnNotepad.className = "seg-tab flex items-center justify-center gap-2 bg-[#161616] text-white border border-white/10 transition cursor-pointer";
+                btnTasks.className = "seg-tab flex items-center justify-center gap-2 text-gray-400 hover:text-white transition cursor-pointer";
                 sideNotepad.classList.remove('hidden');
                 sideTasks.classList.add('hidden');
                 mainNotepad.classList.remove('hidden');
                 mainTasks.classList.add('hidden');
+                renderEditorPanes();
                 renderNotepadTree();
                 if (!selectedNoteId && state.notepad.length > 0) {
                     selectNote(state.notepad[0].id);
@@ -3460,18 +4088,16 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 const dr = document.getElementById('taskDetailDrawer');
                 if (dr) dr.classList.add('hidden');
             }
+            if (mode !== 'kanban') mode = 'list';
             currentViewMode = mode;
-            document.getElementById('view-mode-list').className = mode === 'list' ? "px-2.5 py-1 rounded bg-[#2a2a2a] text-white border border-white/10 transition cursor-pointer" : "px-2.5 py-1 rounded text-gray-400 hover:text-white transition cursor-pointer";
-            document.getElementById('view-mode-kanban').className = mode === 'kanban' ? "px-2.5 py-1 rounded bg-[#2a2a2a] text-white border border-white/10 transition cursor-pointer" : "px-2.5 py-1 rounded text-gray-400 hover:text-white transition cursor-pointer";
-            document.getElementById('view-mode-charts').className = mode === 'charts' ? "px-2.5 py-1 rounded bg-[#2a2a2a] text-white border border-white/10 transition cursor-pointer" : "px-2.5 py-1 rounded text-gray-400 hover:text-white transition cursor-pointer";
+            document.getElementById('view-mode-list').className = mode === 'list' ? "px-2.5 py-1 rounded bg-[#161616] text-white border border-white/10 transition cursor-pointer" : "px-2.5 py-1 rounded text-gray-400 hover:text-white transition cursor-pointer";
+            document.getElementById('view-mode-kanban').className = mode === 'kanban' ? "px-2.5 py-1 rounded bg-[#161616] text-white border border-white/10 transition cursor-pointer" : "px-2.5 py-1 rounded text-gray-400 hover:text-white transition cursor-pointer";
 
             document.getElementById('list-view-container').classList.toggle('hidden', mode !== 'list');
             document.getElementById('kanban-view-container').classList.toggle('hidden', mode !== 'kanban');
-            document.getElementById('charts-view-container').classList.toggle('hidden', mode !== 'charts');
 
             if (mode === 'list') renderTasksList();
             else if (mode === 'kanban') renderKanbanView();
-            else if (mode === 'charts') renderChartsView();
         }
 
         function selectList(id) {
@@ -3533,7 +4159,6 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         function renderCurrentView() {
             if (appMode !== 'tasks') { renderNotepadTree(); return; }
             if (currentViewMode === 'kanban') renderKanbanView();
-            else if (currentViewMode === 'charts') renderChartsView();
             else renderTasksList();
         }
 
@@ -3579,35 +4204,24 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             let stepsHTML = '';
             if (steps.length > 0) {
                 stepsHTML = `
-                    <div class="mt-2 pt-2 border-t border-[#2f2f2f]/60 space-y-1" onclick="event.stopPropagation()">
+                    <div class="mt-2 pt-2 border-t border-[#262626]/60 space-y-1" onclick="event.stopPropagation()">
                         <div class="text-[10px] text-gray-500 font-mono flex items-center justify-between mb-1">
                             <span>Etapas (${steps.filter(s=>s.completed).length}/${steps.length})</span>
                         </div>
-                        <!-- auto-fill responde à largura do card; sm:grid-cols-2 respondia
-                             à da janela e mantinha 2 colunas num card já estreito. -->
-                        <div class="gap-1.5" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">
-                            ${steps.map((s, idx) => `
-                                <div class="flex items-center gap-2 p-1 bg-white/5 rounded hover:bg-white/10 transition text-xs">
-                                    <button onclick="toggleStepDirect('${t.id}', ${idx})" class="w-3.5 h-3.5 rounded border ${s.completed ? 'bg-[#2eaadc] border-[#2eaadc] text-white' : 'border-gray-600 hover:border-sky-400'} flex items-center justify-center transition cursor-pointer flex-shrink-0">
-                                        ${s.completed ? '<i class="fa-solid fa-check text-[8px]"></i>' : ''}
-                                    </button>
-                                    <span class="${s.completed ? 'line-through text-gray-500' : 'text-gray-300'} truncate text-[11px]">${escapeHtml(s.title)}</span>
-                                </div>
-                            `).join('')}
-                        </div>
+                        ${stepsFullHtml(t.id, steps)}
                     </div>
                 `;
             }
 
             return `
-                <div onclick="handleTaskCardClick(event, '${t.id}')" class="group notion-card rounded p-3 flex flex-col gap-2 cursor-pointer select-none ${selectedTaskId === t.id ? 'selected' : ''} ${isBatchSelected ? 'bg-sky-950/30 border-[#2eaadc]/50' : ''}">
+                <div onclick="handleTaskCardClick(event, '${t.id}')" class="group notion-card rounded p-3 flex flex-col gap-2 cursor-pointer select-none ${selectedTaskId === t.id ? 'selected' : ''} ${isBatchSelected ? 'bg-sky-950/30 border-[#4272c4]/50' : ''}">
                     <!-- flex-wrap + base mínima no título: quando o espaço aperta
                          (janela estreita ou painel de detalhes aberto), a fileira de
                          etiquetas desce para a linha de baixo em vez de esmagar o
                          título até sumir e vazar para fora do card. -->
                     <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 min-w-0">
                         <div class="flex items-center gap-2.5 min-w-0" style="flex: 1 1 190px">
-                            <button onclick="event.stopPropagation(); toggleTaskSelection('${t.id}')" class="w-4 h-4 rounded border ${isBatchSelected ? 'bg-[#2eaadc] border-[#2eaadc] text-white opacity-100' : 'border-gray-600 hover:border-sky-400 opacity-0 group-hover:opacity-100'} flex items-center justify-center transition cursor-pointer flex-shrink-0" title="Selecionar para exclusão/ações em massa">
+                            <button onclick="event.stopPropagation(); toggleTaskSelection('${t.id}')" class="w-4 h-4 rounded border ${isBatchSelected ? 'bg-[#4272c4] border-[#4272c4] text-white opacity-100' : 'border-gray-600 hover:border-sky-400 opacity-0 group-hover:opacity-100'} flex items-center justify-center transition cursor-pointer flex-shrink-0" title="Selecionar para exclusão/ações em massa">
                                 ${isBatchSelected ? '<i class="fa-solid fa-check text-[9px]"></i>' : ''}
                             </button>
 
@@ -3623,6 +4237,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                             ${cat ? `<span class="text-[10px] bg-white/5 text-gray-400 px-1.5 py-0.5 rounded border border-white/5 max-w-[45%] truncate whitespace-nowrap" title="${escapeHtml(cat.name)}"><i class="${cat.icon || 'fa-regular fa-folder'} mr-1 text-[9px]"></i>${escapeHtml(cat.name)}</span>` : ''}
                             ${proj ? `<span class="text-[10px] bg-sky-500/10 text-sky-300 px-1.5 py-0.5 rounded border border-sky-500/20 max-w-[45%] truncate whitespace-nowrap" title="${escapeHtml(proj.name)}"><i class="${proj.icon || 'fa-solid fa-folder-tree'} mr-1 text-[9px]"></i>${escapeHtml(proj.name)}</span>` : ''}
                             ${t.dueDate ? `<span class="text-[10px] text-gray-400 bg-white/5 px-1.5 py-0.5 rounded border border-white/5 whitespace-nowrap"><i class="fa-regular fa-calendar mr-1"></i>${formatDateBR(t.dueDate)}</span>` : ''}
+                            ${(() => { const nt = t.noteId && state.notepad.find(n => n.id === t.noteId); return nt ? `<span onclick="abrirNotaDaTarefa('${nt.id}')" class="text-[10px] text-sky-300 bg-sky-500/10 px-1.5 py-0.5 rounded border border-sky-500/20 max-w-[45%] truncate whitespace-nowrap cursor-pointer hover:text-white" title="Abrir no Vault: ${escapeHtml(nt.title || '')}"><i class="fa-solid fa-book-bookmark mr-1 text-[9px]"></i>${escapeHtml(nt.title || 'Nota')}</span>` : ''; })()}
                             ${atts.length > 0 ? `<span class="text-[10px] text-sky-300 bg-sky-500/10 px-1.5 py-0.5 rounded border border-sky-500/20 whitespace-nowrap" title="${escapeHtml(atts.map(a => a.name).join(', '))}"><i class="fa-solid fa-paperclip mr-1"></i>${atts.length} · ${formatarTamanho(atts.reduce((s,a)=>s+(Number(a.size)||0),0))}</span>` : ''}
                             ${t.notes ? `<i class="fa-regular fa-note-sticky text-gray-500 text-xs" title="Possui anotações"></i>` : ''}
                             <button onclick="toggleTaskMyDay('${t.id}')" class="text-xs ${t.isMyDay !== false ? 'text-amber-400' : 'text-gray-600 hover:text-amber-300'} transition cursor-pointer p-0.5" title="${t.isMyDay !== false ? 'Remover do Meu Dia' : 'Adicionar ao Meu Dia'}">
@@ -3635,9 +4250,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     </div>
 
                     <div class="flex items-center gap-3 pt-1 min-w-0" onclick="event.stopPropagation()">
-                        <span class="text-[10px] font-mono font-bold text-[#2eaadc] w-7 flex-shrink-0">${progVal}%</span>
+                        <span class="text-[10px] font-mono font-bold text-[#4272c4] w-7 flex-shrink-0">${progVal}%</span>
                         <div class="flex-1 min-w-0 bg-white/10 h-1.5 rounded-full overflow-hidden cursor-pointer relative" onclick="setTaskProgressFromClick(event, '${t.id}')" title="Clique para alterar o progresso da tarefa">
-                            <div class="bg-[#2eaadc] h-full transition-all duration-300" style="width: ${progVal}%"></div>
+                            <div class="bg-[#4272c4] h-full transition-all duration-300" style="width: ${progVal}%"></div>
                         </div>
                     </div>
 
@@ -3667,9 +4282,12 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
             // Etapas viram um resumo clicável em vez de uma grade que estica o card.
             const stepsHTML = steps.length > 0 ? `
-                <div class="flex items-center gap-1.5 text-[10px] text-gray-500 font-mono">
-                    <i class="fa-solid fa-list-check text-[9px]"></i>
-                    <span>${feitas}/${steps.length} etapas</span>
+                <div class="space-y-1">
+                    <div class="flex items-center gap-1.5 text-[10px] text-gray-500 font-mono">
+                        <i class="fa-solid fa-list-check text-[9px]"></i>
+                        <span>${feitas}/${steps.length} etapas</span>
+                    </div>
+                    ${stepsFullHtml(t.id, steps)}
                 </div>` : '';
 
             const badges = [
@@ -3682,7 +4300,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             ].filter(Boolean).join('');
 
             return `
-                <div onclick="handleTaskCardClick(event, '${t.id}')" class="group notion-card rounded p-2.5 flex flex-col gap-2 cursor-pointer select-none min-w-0 ${selectedTaskId === t.id ? 'selected' : ''} ${isBatchSelected ? 'bg-sky-950/30 border-[#2eaadc]/50' : ''}">
+                <div onclick="handleTaskCardClick(event, '${t.id}')" class="group notion-card rounded p-2.5 flex flex-col gap-2 cursor-pointer select-none min-w-0 ${selectedTaskId === t.id ? 'selected' : ''} ${isBatchSelected ? 'bg-sky-950/30 border-[#4272c4]/50' : ''}">
 
                     <div class="flex items-start gap-2 min-w-0">
                         <button onclick="event.stopPropagation(); toggleTaskCompletion('${t.id}')" class="w-4 h-4 mt-0.5 rounded-full border ${isDone ? 'bg-emerald-600 border-emerald-500 text-white' : 'border-gray-600 hover:border-sky-400'} flex items-center justify-center transition cursor-pointer flex-shrink-0" title="Concluir tarefa">
@@ -3695,7 +4313,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                             <button onclick="toggleTaskStar('${t.id}')" class="text-xs ${t.isStarred ? 'text-amber-400' : 'text-gray-600 hover:text-amber-300'} transition cursor-pointer" title="Favoritar">
                                 <i class="${t.isStarred ? 'fa-solid' : 'fa-regular'} fa-star"></i>
                             </button>
-                            <button onclick="toggleTaskSelection('${t.id}')" class="w-4 h-4 rounded border ${isBatchSelected ? 'bg-[#2eaadc] border-[#2eaadc] text-white opacity-100' : 'border-gray-600 hover:border-sky-400 opacity-0 group-hover:opacity-100'} flex items-center justify-center transition cursor-pointer" title="Selecionar">
+                            <button onclick="toggleTaskSelection('${t.id}')" class="w-4 h-4 rounded border ${isBatchSelected ? 'bg-[#4272c4] border-[#4272c4] text-white opacity-100' : 'border-gray-600 hover:border-sky-400 opacity-0 group-hover:opacity-100'} flex items-center justify-center transition cursor-pointer" title="Selecionar">
                                 ${isBatchSelected ? '<i class="fa-solid fa-check text-[9px]"></i>' : ''}
                             </button>
                         </div>
@@ -3706,9 +4324,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     ${stepsHTML}
 
                     <div class="flex items-center gap-2 min-w-0" onclick="event.stopPropagation()">
-                        <span class="text-[10px] font-mono font-bold text-[#2eaadc] flex-shrink-0">${progVal}%</span>
+                        <span class="text-[10px] font-mono font-bold text-[#4272c4] flex-shrink-0">${progVal}%</span>
                         <div class="flex-1 min-w-0 bg-white/10 h-1.5 rounded-full overflow-hidden cursor-pointer" onclick="setTaskProgressFromClick(event, '${t.id}')" title="Clique para alterar o progresso">
-                            <div class="bg-[#2eaadc] h-full transition-all duration-300" style="width: ${progVal}%"></div>
+                            <div class="bg-[#4272c4] h-full transition-all duration-300" style="width: ${progVal}%"></div>
                         </div>
                     </div>
                 </div>
@@ -3868,91 +4486,243 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             showToast(`${total} item(ns) excluído(s) com sucesso!`);
         }
 
-        function exportDatabaseToCSV() {
-            const rows = [];
-            rows.push(["TIPO", "ID", "NOME_TITULO", "CATEGORIA_PAI", "PROJETO", "PRIORIDADE", "PROGRESSO", "DATA", "NOTAS_CONTEUDO"]);
+        /* =====================================================================
+           BACKUP / RESTAURACAO DO BANCO INTEIRO
+           O arquivo .json e uma copia fiel do `state` (o mesmo que e gravado em
+           disco e na nuvem): tarefas com etapas/links/anexos/datas, categorias,
+           projetos, Vault inteiro (hierarquia, icones, conteudo), perfil e
+           layout do editor. CSV so e aceito na importacao (arquivos antigos).
+           ===================================================================== */
+        const BACKUP_FORMAT = 'nexus-backup';
+        const DATA_KEYS = ['categories', 'projects', 'tasks', 'notepad'];
+        const RE_DATA = /^\d{4}-\d{2}-\d{2}$/;
+        const RE_ISO = /^\d{4}-\d{2}-\d{2}T/;
 
-            state.tasks.forEach(t => {
-                const catName = state.categories.find(c => c.id === t.categoryId)?.name || '';
-                const projName = state.projects.find(p => p.id === t.projectId)?.name || '';
-                rows.push([
-                    "TAREFA", t.id || '', t.title || '', catName, projName,
-                    t.priority || 'Média', (t.progress || 0) + "%", t.dueDate || t.createdAt || '', t.notes || ''
-                ]);
-            });
-
-            state.categories.forEach(c => rows.push(["CATEGORIA", c.id, c.name, c.icon || '', "", "", "", "", ""]));
-            state.projects.forEach(p => rows.push(["PROJETO", p.id, p.name, p.icon || '', "", "", "", "", ""]));
-            state.notepad.forEach(n => rows.push(["VAULT_NOTA", n.id, n.title, n.parentId || '', "", "", "", n.createdAt || '', n.content || '']));
-
-            const csvContent = rows.map(r => r.map(cell => `"${String(cell || '').replace(/"/g, '""')}"`).join(',')).join('\n');
-
-            if (window.pywebview && window.pywebview.api) {
-                window.pywebview.api.save_file_native(csvContent, 'NEXUS_database_full.csv', 'csv').then(res => {
-                    if (res && res.status === 'success') showToast("Banco de Dados exportado em CSV!");
-                });
+        /* Prazo e sempre AAAA-MM-DD. Um timestamp ISO ali (efeito do CSV antigo,
+           que misturava prazo e data de criacao) vira data de criacao. */
+        function normalizarDatasDaTarefa(t) {
+            if (typeof t.dueDate === 'string' && RE_ISO.test(t.dueDate)) {
+                t.createdAt = t.dueDate;
+                t.dueDate = '';
+            } else if (typeof t.dueDate === 'string' && /^\d{2}\/\d{2}\/\d{4}$/.test(t.dueDate)) {
+                const [d, m, y] = t.dueDate.split('/');
+                t.dueDate = `${y}-${m}-${d}`;
+            } else if (typeof t.dueDate !== 'string' || (t.dueDate && !RE_DATA.test(t.dueDate))) {
+                t.dueDate = '';
             }
+            if (typeof t.createdAt !== 'string' || isNaN(Date.parse(t.createdAt))) t.createdAt = new Date().toISOString();
         }
 
-        function triggerImportCSV() {
+        function exportDatabaseFull() {
+            if (!(window.pywebview && window.pywebview.api)) { showToast("A exportação só funciona no aplicativo."); return; }
+            try { flushNoteSaves(); } catch (e) { /* editor fechado */ }
+
+            const data = JSON.parse(JSON.stringify(state));
+            const hoje = new Date();
+            const stamp = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}-${String(hoje.getDate()).padStart(2, '0')}`;
+            const payload = {
+                format: BACKUP_FORMAT,
+                schema: 1,
+                appVersion: ((document.getElementById('app-version-badge') || {}).innerText || '').trim(),
+                exportedAt: hoje.toISOString(),
+                account: (cloudInfo && cloudInfo.email) || '',
+                counts: {
+                    tasks: data.tasks.length, categories: data.categories.length,
+                    projects: data.projects.length, notepad: data.notepad.length
+                },
+                data
+            };
+            window.pywebview.api.save_file_native(JSON.stringify(payload, null, 2), `NEXUS_backup_${stamp}.json`, 'json').then(res => {
+                if (res && res.status === 'success') {
+                    showToast(`Backup completo exportado: ${payload.counts.tasks} tarefas, ${payload.counts.notepad} notas, ${payload.counts.projects} projetos.`);
+                } else if (res && res.status === 'error') {
+                    showToast("Erro ao exportar: " + (res.message || ''));
+                }
+            }).catch(() => showToast("Erro ao exportar o backup."));
+        }
+
+        function triggerImportBackup() {
             const input = document.getElementById('csvFileInput');
             if (input) input.click();
         }
 
-        function importDatabaseFromCSVFile(event) {
+        function importDatabaseFromFile(event) {
             const file = event.target.files[0];
+            event.target.value = '';
             if (!file) return;
-
             const reader = new FileReader();
-            reader.onload = function(e) {
+            reader.onload = e => {
                 try {
-                    parseAndLoadCSVData(e.target.result);
+                    const incoming = parseBackupText(String(e.target.result || ''));
+                    abrirImportacao(incoming, file.name);
                 } catch (err) {
-                    console.error("CSV import error:", err);
-                    showToast("Erro ao importar arquivo CSV.");
+                    console.error("Import error:", err);
+                    showToast("Não foi possível importar: " + (err && err.message ? err.message : 'arquivo inválido'));
                 }
             };
             reader.readAsText(file, "UTF-8");
-            event.target.value = '';
         }
 
-        function parseAndLoadCSVData(csvText) {
-            const lines = parseCSVLines(csvText);
-            if (lines.length <= 1) return;
+        /* Devolve { kind, has:Set, categories, projects, tasks, notepad, extra } */
+        function parseBackupText(text) {
+            const t = text.replace(/^﻿/, '').trim();
+            if (!t) throw new Error('arquivo vazio');
+            if (t[0] === '{' || t[0] === '[') return jsonToIncoming(JSON.parse(t));
+            return csvToIncoming(t);
+        }
 
-            for (let i = 1; i < lines.length; i++) {
-                const row = lines[i];
-                if (!row || row.length < 3) continue;
+        function jsonToIncoming(obj) {
+            let d = obj;
+            if (Array.isArray(d)) d = { tasks: d };
+            if (d.format === BACKUP_FORMAT && d.data) d = d.data;
+            else {
+                if (d.data && typeof d.data === 'object') d = d.data;
+                if (d.state && typeof d.state === 'object') d = d.state;
+            }
+            const inc = { kind: 'json', has: new Set(), extra: {} };
+            const pick = (...names) => { for (const n of names) if (Array.isArray(d[n])) return d[n]; return null; };
+            const src = {
+                categories: pick('categories', 'categorias'),
+                projects: pick('projects', 'projetos'),
+                tasks: pick('tasks', 'tarefas', 'items'),
+                notepad: pick('notepad', 'notes', 'vault')
+            };
+            DATA_KEYS.forEach(k => {
+                if (!src[k]) { inc[k] = []; return; }
+                inc.has.add(k);
+                inc[k] = src[k].filter(x => x && typeof x === 'object').map((x, i) => {
+                    const c = { ...x };
+                    if (!c.id) c.id = `${k === 'notepad' ? 'note' : k === 'tasks' ? 'task' : k === 'projects' ? 'proj' : 'cat'}-${Date.now()}-${i}`;
+                    return c;
+                });
+            });
+            Object.keys(d).forEach(k => { if (!DATA_KEYS.includes(k) && !['categorias', 'projetos', 'tarefas', 'items', 'notes', 'vault', 'format', 'schema'].includes(k)) inc.extra[k] = d[k]; });
+            if (d.profile && !inc.extra.userProfile) inc.extra.userProfile = d.profile;
+            if (!inc.has.size || DATA_KEYS.every(k => inc[k].length === 0)) throw new Error('o arquivo não contém tarefas, categorias, projetos nem notas');
+            return inc;
+        }
 
-                const tipo = String(row[0] || '').trim().toUpperCase();
-                const id = String(row[1] || '').trim();
-                const title = String(row[2] || '').trim();
+        /* CSV antigo do NEXUS: TIPO,ID,NOME_TITULO,CATEGORIA_PAI,PROJETO,PRIORIDADE,PROGRESSO,DATA,NOTAS_CONTEUDO */
+        function csvToIncoming(text) {
+            const lines = parseCSVLines(text);
+            if (lines.length < 2 || String(lines[0][0] || '').trim().toUpperCase() !== 'TIPO') {
+                throw new Error('formato não reconhecido (esperado .json do NEXUS ou o CSV exportado por ele)');
+            }
+            const inc = { kind: 'csv', has: new Set(['categories', 'projects', 'tasks', 'notepad']), extra: {}, categories: [], projects: [], tasks: [], notepad: [] };
+            const rows = lines.slice(1).filter(r => r && r.length >= 3 && String(r[2] || '').trim());
+            const tipoDe = r => String(r[0] || '').trim().toUpperCase();
+            const idDe = (r, pre, i) => String(r[1] || '').trim() || `${pre}-${Date.now()}-${i}`;
 
-                if (!title) continue;
-
-                if (tipo === 'TAREFA' || tipo === 'TASK') {
-                    state.tasks.unshift({
-                        id: id || ('task-' + Date.now() + '-' + i),
-                        title: title,
-                        notes: String(row[8] || '').trim(),
-                        categoryId: state.categories[0]?.id || null,
-                        projectId: null,
-                        priority: String(row[5] || 'Média').trim(),
-                        progress: parseInt(String(row[6] || '0').replace('%', '')) || 0,
-                        isStarred: false,
-                        isMyDay: true,
-                        dueDate: String(row[7] || '').trim(),
-                        steps: [],
-                        links: [],
-                        attachments: [],
-                        createdAt: new Date().toISOString()
+            rows.forEach((r, i) => {
+                const tipo = tipoDe(r);
+                if (tipo === 'CATEGORIA') inc.categories.push({ id: idDe(r, 'cat', i), name: String(r[2]).trim(), icon: String(r[3] || '').trim() || 'fa-regular fa-folder' });
+                else if (tipo === 'PROJETO') inc.projects.push({ id: idDe(r, 'proj', i), name: String(r[2]).trim(), icon: String(r[3] || '').trim() || 'fa-solid fa-folder-tree', color: '#4272c4' });
+                else if (tipo === 'VAULT_NOTA') {
+                    const criada = String(r[7] || '').trim();
+                    inc.notepad.push({
+                        id: idDe(r, 'note', i), parentId: String(r[3] || '').trim() || null,
+                        title: String(r[2]).trim(), icon: 'fa-regular fa-file-lines',
+                        content: String(r[8] || '') || '<p></p>', expanded: true,
+                        createdAt: RE_ISO.test(criada) && !isNaN(Date.parse(criada)) ? criada : new Date().toISOString()
                     });
                 }
+            });
+
+            // O CSV guarda categoria/projeto da tarefa pelo NOME: procura no arquivo e, se nao achar, no banco atual.
+            const achar = (nome, doArquivo, doBanco) => {
+                const n = String(nome || '').trim().toLowerCase();
+                if (!n) return null;
+                const f = x => String(x.name || '').trim().toLowerCase() === n;
+                return (doArquivo.find(f) || (doBanco || []).find(f) || {}).id || null;
+            };
+            rows.forEach((r, i) => {
+                const tipo = tipoDe(r);
+                if (tipo !== 'TAREFA' && tipo !== 'TASK') return;
+                const data = String(r[7] || '').trim();
+                const t = {
+                    id: idDe(r, 'task', i), title: String(r[2]).trim(), notes: String(r[8] || '').trim(),
+                    categoryId: achar(r[3], inc.categories, state.categories),
+                    projectId: achar(r[4], inc.projects, state.projects),
+                    priority: String(r[5] || 'Média').trim() || 'Média',
+                    progress: parseInt(String(r[6] || '0').replace('%', '')) || 0,
+                    isStarred: false, isMyDay: false,
+                    dueDate: RE_DATA.test(data) ? data : '',
+                    steps: [], links: [], attachments: [],
+                    createdAt: RE_ISO.test(data) ? data : new Date().toISOString()
+                };
+                inc.tasks.push(t);
+            });
+            return inc;
+        }
+
+        function abrirImportacao(inc, nomeArquivo) {
+            const novos = k => inc[k].filter(x => !state[k].some(e => e.id === x.id)).length;
+            const linha = (rot, k) => `<div class="flex justify-between bg-[#050505] border border-[#262626] rounded px-2.5 py-1.5"><span class="text-gray-400">${rot}</span><span class="text-gray-200"><b>${inc[k].length}</b> <span class="text-gray-500">(${novos(k)} novas)</span></span></div>`;
+            const ov = document.createElement('div');
+            ov.id = 'importModal';
+            ov.className = 'fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4';
+            ov.innerHTML = `
+                <div class="bg-[#0a0a0a] border border-[#262626] rounded-xl w-full max-w-md p-5 space-y-3.5 text-xs shadow-2xl">
+                    <h3 class="text-sm font-bold text-white flex items-center gap-2"><i class="fa-solid fa-file-import text-sky-400"></i> Importar banco de dados</h3>
+                    <p class="text-gray-400 break-all">Arquivo: <span class="text-gray-200">${escapeHtml(nomeArquivo)}</span> · ${inc.kind === 'json' ? 'backup completo (.json)' : 'CSV antigo (tarefas, categorias, projetos e Vault)'}</p>
+                    <div class="grid grid-cols-2 gap-2">
+                        ${linha('Tarefas', 'tasks')}${linha('Notas do Vault', 'notepad')}
+                        ${linha('Projetos', 'projects')}${linha('Categorias', 'categories')}
+                    </div>
+                    ${inc.kind === 'csv' ? '<p class="text-amber-300/90">O CSV não guarda etapas, links, anexos, favoritos nem o ícone/estado das notas. Para não perder nada no futuro, use o backup .json.</p>' : ''}
+                    <p class="text-gray-400"><b class="text-gray-200">Mesclar</b>: mantém o que você já tem e adiciona o do arquivo (itens com o mesmo ID são atualizados).<br>
+                    <b class="text-gray-200">Substituir tudo</b>: troca o banco atual da conta pelo conteúdo do arquivo.</p>
+                    <div class="flex flex-wrap justify-end gap-2 pt-1">
+                        <button id="imp-backup" class="px-3 py-1.5 rounded border border-[#262626] text-gray-300 hover:text-white">Exportar backup atual</button>
+                        <button id="imp-cancel" class="px-3 py-1.5 rounded border border-[#262626] text-gray-300 hover:text-white">Cancelar</button>
+                        <button id="imp-merge" class="px-3 py-1.5 rounded bg-[#4272c4] text-white font-semibold">Mesclar</button>
+                        <button id="imp-replace" class="px-3 py-1.5 rounded bg-rose-600/80 text-white font-semibold">Substituir tudo</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(ov);
+            const fechar = () => ov.remove();
+            ov.querySelector('#imp-cancel').onclick = fechar;
+            ov.querySelector('#imp-backup').onclick = () => exportDatabaseFull();
+            ov.querySelector('#imp-merge').onclick = () => { fechar(); aplicarImportacao(inc, 'merge'); };
+            ov.querySelector('#imp-replace').onclick = () => {
+                if (!confirm('Substituir TODO o banco atual (tarefas, projetos, categorias e Vault) pelo conteúdo do arquivo?\n\nA mudança será enviada à sua conta na nuvem.')) return;
+                fechar(); aplicarImportacao(inc, 'replace');
+            };
+        }
+
+        function aplicarImportacao(inc, modo) {
+            try { flushNoteSaves(); } catch (e) { }
+            if (modo === 'replace') {
+                DATA_KEYS.forEach(k => { if (inc.has.has(k)) state[k] = inc[k]; });
+                Object.keys(inc.extra).forEach(k => {
+                    if (k === 'userProfile' && inc.extra[k] && typeof inc.extra[k] === 'object') state.userProfile = { ...(state.userProfile || {}), ...inc.extra[k] };
+                    else state[k] = inc.extra[k];
+                });
+            } else {
+                DATA_KEYS.forEach(k => {
+                    const mapa = new Map((state[k] || []).map(x => [x.id, x]));
+                    inc[k].forEach(x => mapa.set(x.id, x));   // mesmo ID: versao do arquivo; novo: no fim
+                    state[k] = [...mapa.values()];
+                });
+                Object.keys(inc.extra).forEach(k => {
+                    if (k === 'userProfile' && inc.extra[k] && typeof inc.extra[k] === 'object') {
+                        const atual = state.userProfile || {};
+                        const novo = { ...inc.extra[k] };
+                        Object.keys(atual).forEach(c => { if (atual[c]) novo[c] = atual[c]; });   // perfil atual vence
+                        state.userProfile = novo;
+                    } else if (!(k in state)) state[k] = inc.extra[k];
+                });
             }
 
+            sanitizeState();
+            selectedTaskId = null; selectedNoteId = null;
+            try { clearAllSelections(); } catch (e) { }
+            const dr = document.getElementById('taskDetailDrawer'); if (dr) dr.classList.add('hidden');
+            try { ensureLayout(); } catch (e) { }
             saveState(true, true);
+            try { renderProfile(); } catch (e) { }
             renderAll();
-            showToast("Dados do CSV importados com sucesso!");
+            showToast(`Importado: ${inc.tasks.length} tarefas, ${inc.notepad.length} notas, ${inc.projects.length} projetos, ${inc.categories.length} categorias.`);
         }
 
         function parseCSVLines(text) {
@@ -3994,12 +4764,12 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             c.innerHTML = state.categories.map(cat => {
                 const isSel = selectedCategoryIds.has(cat.id);
                 return `
-                    <div class="group flex items-center justify-between rounded hover:bg-white/5 pr-1 ${isSel ? 'bg-sky-950/40 border border-[#2eaadc]/40' : ''}">
-                        <button onclick="event.stopPropagation(); toggleCategorySelection('${cat.id}')" class="w-3.5 h-3.5 ml-1 rounded border ${isSel ? 'bg-[#2eaadc] border-[#2eaadc] text-white opacity-100' : 'border-gray-600 hover:border-sky-400 opacity-0 group-hover:opacity-100'} flex items-center justify-center transition cursor-pointer flex-shrink-0" title="Selecionar categoria">
+                    <div class="group flex items-center justify-between rounded hover:bg-white/5 pr-1 ${isSel ? 'bg-sky-950/40 border border-[#4272c4]/40' : ''}">
+                        <button onclick="event.stopPropagation(); toggleCategorySelection('${cat.id}')" class="w-3.5 h-3.5 ml-1 rounded border ${isSel ? 'bg-[#4272c4] border-[#4272c4] text-white opacity-100' : 'border-gray-600 hover:border-sky-400 opacity-0 group-hover:opacity-100'} flex items-center justify-center transition cursor-pointer flex-shrink-0" title="Selecionar categoria">
                             ${isSel ? '<i class="fa-solid fa-check text-[8px]"></i>' : ''}
                         </button>
-                        <button onclick="selectList('${cat.id}')" id="nav-${cat.id}" class="nav-btn notion-btn flex-1 flex items-center gap-2 px-2 py-1 rounded text-xs text-gray-300 cursor-pointer">
-                            <i class="${cat.icon || 'fa-regular fa-folder'} text-sky-400 text-xs w-4 text-center"></i>
+                        <button title="${escapeHtml(cat.name)}" onclick="selectList('${cat.id}')" id="nav-${cat.id}" class="nav-btn notion-btn flex-1 flex items-center gap-2 px-2 py-1 rounded text-xs text-gray-300 cursor-pointer">
+                            <i class="${cat.icon || 'fa-regular fa-folder'} cg-keep text-sky-400 text-xs w-4 text-center"></i>
                             <span class="flex-1 text-left truncate">${escapeHtml(cat.name)}</span>
                         </button>
                         <div class="hidden group-hover:flex items-center gap-1">
@@ -4027,7 +4797,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 const isSel = selectedProjectIds.has(proj.id);
                 const prog = getProjectProgress(proj.id);
 
-                let cor = '#2eaadc';
+                let cor = '#4272c4';
                 if (prog.pct >= 100) cor = '#10b981';
                 else if (prog.pct === 0) cor = '#52525b';
 
@@ -4036,13 +4806,13 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     : `${prog.done} de ${prog.total} tarefa(s) concluída(s) — ${prog.pct}%`;
 
                 return `
-                    <div class="group rounded hover:bg-white/5 pr-1 ${isSel ? 'bg-sky-950/40 border border-[#2eaadc]/40' : ''}">
+                    <div class="group rounded hover:bg-white/5 pr-1 ${isSel ? 'bg-sky-950/40 border border-[#4272c4]/40' : ''}">
                         <div class="flex items-center justify-between min-w-0">
-                            <button onclick="event.stopPropagation(); toggleProjectSelection('${proj.id}')" class="w-3.5 h-3.5 ml-1 rounded border ${isSel ? 'bg-[#2eaadc] border-[#2eaadc] text-white opacity-100' : 'border-gray-600 hover:border-sky-400 opacity-0 group-hover:opacity-100'} flex items-center justify-center transition cursor-pointer flex-shrink-0" title="Selecionar projeto">
+                            <button onclick="event.stopPropagation(); toggleProjectSelection('${proj.id}')" class="w-3.5 h-3.5 ml-1 rounded border ${isSel ? 'bg-[#4272c4] border-[#4272c4] text-white opacity-100' : 'border-gray-600 hover:border-sky-400 opacity-0 group-hover:opacity-100'} flex items-center justify-center transition cursor-pointer flex-shrink-0" title="Selecionar projeto">
                                 ${isSel ? '<i class="fa-solid fa-check text-[8px]"></i>' : ''}
                             </button>
-                            <button onclick="selectList('${proj.id}')" id="nav-${proj.id}" class="nav-btn notion-btn flex-1 min-w-0 flex items-center gap-2 px-2 py-1 rounded text-xs text-gray-300 cursor-pointer">
-                                <i class="${proj.icon || 'fa-solid fa-folder-tree'} text-purple-400 text-xs w-4 text-center flex-shrink-0"></i>
+                            <button title="${escapeHtml(proj.name)}" onclick="selectList('${proj.id}')" id="nav-${proj.id}" class="nav-btn notion-btn flex-1 min-w-0 flex items-center gap-2 px-2 py-1 rounded text-xs text-gray-300 cursor-pointer">
+                                <i class="${proj.icon || 'fa-solid fa-folder-tree'} cg-keep text-purple-400 text-xs w-4 text-center flex-shrink-0"></i>
                                 <span class="flex-1 text-left truncate">${escapeHtml(proj.name)}</span>
                                 <span class="text-[9px] font-mono flex-shrink-0 ${prog.vazio ? 'text-gray-600' : 'text-gray-400'}">${prog.vazio ? '—' : prog.pct + '%'}</span>
                             </button>
@@ -4084,6 +4854,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             saveState(true, true);
             input.value = '';
             renderAll();
+            nxToast('Tarefa criada');
         }
 
         function toggleTaskCompletion(taskId) {
@@ -4105,6 +4876,23 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 saveState(true, true);
                 renderAll();
             }
+        }
+
+        /* Etapas com o texto COMPLETO (quebra de linha, sem cortar com "..."),
+           para a leitura do que fazer na tarefa. */
+        function stepsFullHtml(taskId, steps) {
+            return `<div class="space-y-1" onclick="event.stopPropagation()">` + steps.map((s, idx) => `
+                <div class="flex items-start gap-2 p-1.5 bg-white/5 rounded hover:bg-white/10 transition text-xs">
+                    <button onclick="toggleStepDirect('${taskId}', ${idx})" class="mt-0.5 w-3.5 h-3.5 rounded border ${s.completed ? 'bg-[#4272c4] border-[#4272c4] text-white' : 'border-gray-600 hover:border-sky-400'} flex items-center justify-center transition cursor-pointer flex-shrink-0">
+                        ${s.completed ? '<i class="fa-solid fa-check text-[8px]"></i>' : ''}
+                    </button>
+                    <span class="${s.completed ? 'line-through text-gray-500' : 'text-gray-200'} min-w-0 flex-1 whitespace-pre-wrap break-words leading-snug">${escapeHtml(s.title)}</span>
+                </div>`).join('') + `</div>`;
+        }
+
+        function autoGrow(el) {
+            el.style.height = 'auto';
+            el.style.height = (el.scrollHeight + 2) + 'px';
         }
 
         function toggleStepDirect(taskId, stepIndex) {
@@ -4176,15 +4964,22 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             document.getElementById('detailStepsProgress').innerText = `${stepsDone}/${steps.length}`;
             document.getElementById('detailStepsContainer').innerHTML = steps.map((s, idx) => `
                 <div class="flex items-center justify-between gap-2 p-1.5 bg-white/5 rounded">
-                    <div class="flex items-center gap-2 flex-1">
-                        <button onclick="toggleStepDirect('${t.id}', ${idx})" class="w-3.5 h-3.5 rounded border ${s.completed ? 'bg-[#2eaadc] border-[#2eaadc] text-white' : 'border-gray-600'} flex items-center justify-center text-[8px] cursor-pointer">
+                    <div class="flex items-start gap-2 flex-1 min-w-0">
+                        <button onclick="toggleStepDirect('${t.id}', ${idx})" class="mt-1 w-3.5 h-3.5 flex-shrink-0 rounded border ${s.completed ? 'bg-[#4272c4] border-[#4272c4] text-white' : 'border-gray-600'} flex items-center justify-center text-[8px] cursor-pointer">
                             ${s.completed ? '<i class="fa-solid fa-check"></i>' : ''}
                         </button>
-                        <span class="text-xs ${s.completed ? 'line-through text-gray-500' : 'text-gray-200'}">${escapeHtml(s.title)}</span>
+                        <textarea rows="1" title="Clique para editar a etapa" oninput="autoGrow(this)"
+                               onchange="editStepFromDrawer(${idx}, this.value)"
+                               onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}else if(event.key==='Escape'){this.value=this.defaultValue;this.blur();}"
+                               class="step-edit flex-1 min-w-0 resize-none overflow-hidden bg-transparent border border-transparent hover:border-white/10 focus:border-white/25 focus:bg-white/5 rounded px-1 py-0.5 text-xs leading-snug focus:outline-none ${s.completed ? 'line-through text-gray-500' : 'text-gray-200'}">${escapeHtml(s.title)}</textarea>
                     </div>
                     <button onclick="removeStepFromDrawer(${idx})" class="text-gray-500 hover:text-rose-400 text-xs cursor-pointer"><i class="fa-regular fa-trash-can"></i></button>
                 </div>
             `).join('');
+
+            const _stepsBox = document.getElementById('detailStepsContainer');
+            const _grow = () => _stepsBox.querySelectorAll('textarea.step-edit').forEach(autoGrow);
+            _grow(); requestAnimationFrame(_grow); setTimeout(_grow, 120);
 
             const atts = Array.isArray(t.attachments) ? t.attachments : [];
             const totalBytes = atts.reduce((acc, a) => acc + (Number(a.size) || 0), 0);
@@ -4336,6 +5131,18 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             }
         }
 
+        function editStepFromDrawer(idx, novoTitulo) {
+            if (!selectedTaskId) return;
+            const t = state.tasks.find(x => x.id === selectedTaskId);
+            if (!t || !Array.isArray(t.steps) || !t.steps[idx]) return;
+            const titulo = String(novoTitulo || '').trim().slice(0, 300);
+            if (!titulo) { populateDrawer(t); return; }
+            if (titulo === t.steps[idx].title) return;
+            t.steps[idx].title = titulo;
+            saveState(true, true);
+            renderCurrentView();
+        }
+
         function removeStepFromDrawer(idx) {
             if (!selectedTaskId) return;
             const t = state.tasks.find(x => x.id === selectedTaskId);
@@ -4424,7 +5231,40 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 ? roots.map(n => renderNoteTreeNode(n, 0, noCaminho)).join('')
                 : '<div class="text-[11px] text-gray-600 italic px-2 py-2">Nenhuma nota ainda.</div>';
 
+            renderNotepadRail(roots, noCaminho);
             atualizarBotaoExpandirTudo();
+        }
+
+        /* Paleta de cores dos icones das notas (10 cores simples).
+           Preto fica quase invisivel no tema preto de proposito (pedido do
+           usuario); ganha um contorno claro bem fino so para nao sumir. */
+        const NOTE_ICON_CORES = [
+            { nome: 'Branco', hex: '#ffffff' }, { nome: 'Cinza', hex: '#9ca3af' }, { nome: 'Preto', hex: '#000000' },
+            { nome: 'Vermelho', hex: '#ef4444' }, { nome: 'Laranja', hex: '#f97316' }, { nome: 'Amarelo', hex: '#facc15' },
+            { nome: 'Verde', hex: '#22c55e' }, { nome: 'Azul', hex: '#3b82f6' }, { nome: 'Roxo', hex: '#a855f7' }, { nome: 'Rosa', hex: '#ec4899' }
+        ];
+        function estiloIconeNota(n) {
+            const hex = n && n.iconColor;
+            if (!hex || !NOTE_ICON_CORES.some(c => c.hex === hex)) return '';   // so cores da paleta
+            const contorno = hex === '#000000' ? ';text-shadow:0 0 1px rgba(255,255,255,.7),0 0 1px rgba(255,255,255,.7)' : '';
+            return `style="color:${hex} !important${contorno}"`;
+        }
+
+        function _listaPlanaDoVault(roots) {
+            const out = [];
+            const visitar = (n, depth) => { out.push({ n, depth }); filhosDaNota(n.id).forEach(f => visitar(f, depth + 1)); };
+            roots.forEach(r => visitar(r, 0));
+            return out;
+        }
+
+        function renderNotepadRail(roots, noCaminho) {
+            const rail = document.getElementById('notepad-rail');
+            if (!rail) return;
+            rail.innerHTML = _listaPlanaDoVault(roots).map(({ n, depth }) => `
+                <button type="button" onclick="selectNote('${n.id}')" title="${escapeHtml(n.title || 'Sem título')}"
+                        class="nx-rb ${depth ? 'sub' : ''} ${selectedNoteId === n.id ? 'on' : ''}">
+                    <i class="${n.icon || 'fa-regular fa-file-lines'} cg-keep" ${estiloIconeNota(n)}></i>
+                </button>`).join('');
         }
 
         function renderNoteTreeNode(note, depth, noCaminho) {
@@ -4446,13 +5286,16 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             return `
                 <div class="note-node ${noCaminho && noCaminho.has(note.id) ? 'no-caminho' : ''}">
                     <div class="note-row-wrap">
-                        <div onclick="selectNote('${note.id}')" class="group notion-btn w-full flex items-center justify-between gap-1 py-1 pr-2 pl-1 rounded text-xs cursor-pointer ${isSel ? 'active' : 'text-gray-300'} ${isBatchSel ? 'bg-sky-950/40 border border-[#2eaadc]/40' : ''}">
+                        <div draggable="true" data-note-id="${note.id}"
+                             ondragstart="noteDragStart(event, '${note.id}')" ondragover="noteDragOver(event, '${note.id}')"
+                             ondragleave="noteDragLeave(event)" ondrop="noteDrop(event, '${note.id}')" ondragend="noteDragEnd()"
+                             onclick="selectNote('${note.id}')" title="${escapeHtml(note.title || 'Sem título')}" class="group notion-btn w-full flex items-center justify-between gap-1 py-1 pr-2 pl-1 rounded text-xs cursor-pointer ${isSel ? 'active' : 'text-gray-300'} ${isBatchSel ? 'bg-sky-950/40 border border-[#4272c4]/40' : ''}">
                             <div class="flex items-center gap-1.5 truncate flex-1 min-w-0">
                                 ${chevron}
-                                <button onclick="event.stopPropagation(); toggleNoteSelection('${note.id}')" class="w-3.5 h-3.5 rounded border ${isBatchSel ? 'bg-[#2eaadc] border-[#2eaadc] text-white opacity-100' : 'border-gray-600 hover:border-sky-400 opacity-0 group-hover:opacity-100'} flex items-center justify-center transition cursor-pointer flex-shrink-0" title="Selecionar nota">
+                                <button onclick="event.stopPropagation(); toggleNoteSelection('${note.id}')" class="w-3.5 h-3.5 rounded border ${isBatchSel ? 'bg-[#4272c4] border-[#4272c4] text-white opacity-100' : 'border-gray-600 hover:border-sky-400 opacity-0 group-hover:opacity-100'} flex items-center justify-center transition cursor-pointer flex-shrink-0" title="Selecionar nota">
                                     ${isBatchSel ? '<i class="fa-solid fa-check text-[8px]"></i>' : ''}
                                 </button>
-                                <i class="${note.icon || 'fa-regular fa-file-lines'} text-sky-400 text-xs w-3.5 text-center flex-shrink-0"></i>
+                                <i class="${note.icon || 'fa-regular fa-file-lines'} cg-keep text-sky-400 text-xs w-3.5 text-center flex-shrink-0" ${estiloIconeNota(note)}></i>
                                 <span class="truncate text-xs">${escapeHtml(note.title || 'Sem título')}</span>
                                 ${ocultos ? `<span class="note-badge-filhos" title="${ocultos} item(ns) recolhido(s)">${ocultos}</span>` : ''}
                             </div>
@@ -4469,6 +5312,120 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                         : ''}
                 </div>
             `;
+        }
+
+        /* ------------------------------------------------------------------
+           ARRASTAR E REPOSICIONAR NOTAS
+           Soltar no terco de CIMA da linha = antes dela; no terco de BAIXO =
+           depois dela; no MEIO = vira subnota. A ordem dos irmaos e a ordem
+           do array state.notepad, entao reordenar e mover no array.
+           ------------------------------------------------------------------ */
+        let dragNoteId = null;
+
+        function _notaEhDescendenteDe(ancestralId, id) {
+            let atual = state.notepad.find(n => n.id === id);
+            let guarda = 0;
+            while (atual && atual.parentId && guarda++ < 200) {
+                if (atual.parentId === ancestralId) return true;
+                atual = state.notepad.find(n => n.id === atual.parentId);
+            }
+            return false;
+        }
+
+        function _limparIndicadoresDrop() {
+            document.querySelectorAll('.note-drop-antes, .note-drop-depois, .note-drop-dentro')
+                .forEach(el => el.classList.remove('note-drop-antes', 'note-drop-depois', 'note-drop-dentro'));
+        }
+
+        function _posicaoDoDrop(event, el) {
+            const r = el.getBoundingClientRect();
+            const y = event.clientY - r.top;
+            if (y < r.height * 0.3) return 'antes';
+            if (y > r.height * 0.7) return 'depois';
+            return 'dentro';
+        }
+
+        function noteDragStart(event, noteId) {
+            dragNoteId = noteId;
+            event.dataTransfer.effectAllowed = 'move';
+            try { event.dataTransfer.setData('text/plain', noteId); } catch (e) {}
+            event.currentTarget.classList.add('note-drag-origem');
+        }
+
+        function noteDragOver(event, alvoId) {
+            if (!dragNoteId || dragNoteId === alvoId || _notaEhDescendenteDe(dragNoteId, alvoId)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            event.dataTransfer.dropEffect = 'move';
+            const pos = _posicaoDoDrop(event, event.currentTarget);
+            _limparIndicadoresDrop();
+            event.currentTarget.classList.add('note-drop-' + pos);
+        }
+
+        function noteDragLeave(event) {
+            event.currentTarget.classList.remove('note-drop-antes', 'note-drop-depois', 'note-drop-dentro');
+        }
+
+        function noteDragEnd() {
+            dragNoteId = null;
+            _limparIndicadoresDrop();
+            document.querySelectorAll('.note-drag-origem').forEach(el => el.classList.remove('note-drag-origem'));
+        }
+
+        function noteDrop(event, alvoId) {
+            event.preventDefault();
+            event.stopPropagation();
+            const pos = _posicaoDoDrop(event, event.currentTarget);
+            const id = dragNoteId;
+            noteDragEnd();
+            if (!id) return;
+            moverNota(id, alvoId, pos);
+        }
+
+        function noteContainerDragOver(event) {
+            if (!dragNoteId) return;
+            event.preventDefault();
+        }
+
+        function noteContainerDrop(event) {
+            event.preventDefault();
+            const id = dragNoteId;
+            noteDragEnd();
+            if (id) moverNota(id, null, 'fim');
+        }
+
+        /* alvoId null + 'fim' = vira nota principal, no fim da lista. */
+        function moverNota(id, alvoId, pos) {
+            const nota = state.notepad.find(n => n.id === id);
+            if (!nota || id === alvoId) return;
+            if (alvoId && _notaEhDescendenteDe(id, alvoId)) {
+                showToast('Uma nota não pode ir para dentro da própria subnota.');
+                return;
+            }
+            const alvo = alvoId ? state.notepad.find(n => n.id === alvoId) : null;
+            if (alvoId && !alvo) return;
+
+            state.notepad = state.notepad.filter(n => n.id !== id);
+
+            if (!alvo) {
+                nota.parentId = null;
+                state.notepad.push(nota);
+            } else if (pos === 'dentro') {
+                nota.parentId = alvo.id;
+                alvo.expanded = true;
+                // Entra como ultima subnota: depois do ultimo filho atual.
+                let ultimo = -1;
+                state.notepad.forEach((n, i) => { if (n.parentId === alvo.id) ultimo = i; });
+                const idxAlvo = state.notepad.findIndex(n => n.id === alvo.id);
+                state.notepad.splice((ultimo >= 0 ? ultimo : idxAlvo) + 1, 0, nota);
+            } else {
+                nota.parentId = alvo.parentId || null;
+                const idxAlvo = state.notepad.findIndex(n => n.id === alvo.id);
+                state.notepad.splice(pos === 'antes' ? idxAlvo : idxAlvo + 1, 0, nota);
+            }
+
+            saveState(true, true);
+            renderNotepadTree();
         }
 
         function toggleNoteExpanded(noteId) {
@@ -4514,27 +5471,302 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             btn.style.display = comFilhos.length ? '' : 'none';
         }
 
+        /* ------------------------------------------------------------------
+           ABAS E SPLIT VIEW DO VAULT
+           state.editorLayout = { panes: [{ tabs: [ids], active: id|null }], focused: 0 }
+           Ate 3 paineis lado a lado (como o VS Code), cada um com suas abas.
+           selectedNoteId sempre aponta para a nota ativa do painel em foco,
+           entao o resto do Vault (arvore, titulo, icone) continua igual.
+           ------------------------------------------------------------------ */
+        const MAX_PANES = 3;
+        const paneSaveTimers = [];
+
+        function ensureLayout() {
+            let L = state.editorLayout;
+            if (!L || typeof L !== 'object' || !Array.isArray(L.panes) || L.panes.length === 0) {
+                L = state.editorLayout = { panes: [{ tabs: [], active: null }], focused: 0 };
+            }
+            const ids = new Set(state.notepad.map(n => n.id));
+            // Corrige IN-PLACE: quem guardou uma referencia a um painel nao fica com um objeto velho.
+            if (L.panes.length > MAX_PANES) L.panes.length = MAX_PANES;
+            L.panes.forEach((p, i) => {
+                if (!p || typeof p !== 'object') p = L.panes[i] = { tabs: [], active: null };
+                p.tabs = Array.isArray(p.tabs) ? p.tabs.filter((id, k, a) => ids.has(id) && a.indexOf(id) === k) : [];
+                if (!p.tabs.includes(p.active)) p.active = p.tabs[p.tabs.length - 1] || null;
+            });
+            if (!Number.isInteger(L.focused) || L.focused < 0 || L.focused >= L.panes.length) L.focused = 0;
+            return L;
+        }
+
+        function focusedPane() { const L = ensureLayout(); return L.panes[L.focused]; }
+
+        function getFocusedEditor() {
+            return document.querySelector(`.note-editor[data-pane="${ensureLayout().focused}"]`);
+        }
+
+        function _syncSelected() {
+            selectedNoteId = focusedPane().active || null;
+        }
+
+        /* Grava ja o que ainda esta so no editor (debounce pendente). */
+        function flushNoteSaves() {
+            const L = ensureLayout();
+            L.panes.forEach((p, i) => {
+                if (!paneSaveTimers[i]) return;
+                clearTimeout(paneSaveTimers[i]);
+                paneSaveTimers[i] = null;
+                const ed = document.querySelector(`.note-editor[data-pane="${i}"]`);
+                const note = p.active && state.notepad.find(n => n.id === p.active);
+                if (ed && note) note.content = sanitizarHtml(ed.innerHTML);
+            });
+        }
+
+        function renderPaneTabbars() {
+            const L = ensureLayout();
+            L.panes.forEach((p, i) => {
+                const bar = document.querySelector(`.pane-tabbar[data-pane="${i}"]`);
+                if (!bar) return;
+                const tabs = p.tabs.map(id => {
+                    const n = state.notepad.find(x => x.id === id);
+                    if (!n) return '';
+                    return `<div class="pane-tab ${id === p.active ? 'ativa' : ''}" draggable="true" title="${escapeHtml(n.title || 'Sem título')}"
+                                 ondragstart="tabDragStart(event, ${i}, '${id}')" onclick="activateTab(${i}, '${id}')">
+                                <i class="${n.icon || 'fa-regular fa-file-lines'} cg-keep text-[11px]" ${estiloIconeNota(n)}></i>
+                                <span class="truncate">${escapeHtml(n.title || 'Sem título')}</span>
+                                <button onclick="event.stopPropagation(); closeTab(${i}, '${id}')" class="text-gray-500 hover:text-white" title="Fechar aba"><i class="fa-solid fa-xmark text-[10px]"></i></button>
+                            </div>`;
+                }).join('');
+                bar.innerHTML = `${tabs}
+                    <button onclick="openPanePicker(${i}, event)" class="px-2 py-1 text-gray-500 hover:text-white rounded" title="Abrir outra nota nesta tela"><i class="fa-solid fa-plus text-xs"></i></button>
+                    ${L.panes.length > 1 ? `<button onclick="closePane(${i})" class="ml-auto px-2 py-1 text-gray-500 hover:text-white rounded" title="Fechar este painel"><i class="fa-solid fa-xmark text-xs"></i></button>` : ''}`;
+            });
+        }
+
+        function renderEditorPanes() {
+            const host = document.getElementById('editor-panes');
+            if (!host) return;
+            flushNoteSaves();
+            const L = ensureLayout();
+            _syncSelected();
+            host.innerHTML = L.panes.map((p, i) => `
+                <div class="note-pane flex-1 min-w-0 flex flex-col ${i === L.focused ? 'foco' : ''}" data-pane="${i}"
+                     ondragover="paneDragOver(event)" ondrop="paneDrop(event, ${i})" onmousedown="setFocusedPane(${i})">
+                    <div class="pane-tabbar flex items-end gap-1 px-2 pt-1.5 bg-[#0a0a0a] border-b border-[#262626] overflow-x-auto flex-shrink-0" data-pane="${i}"></div>
+                    <div class="note-editor flex-1 p-8 overflow-y-auto text-sm text-gray-200 focus:outline-none min-h-0 leading-relaxed font-sans bg-black ${p.active ? '' : 'hidden'}"
+                         data-pane="${i}" contenteditable="true" oninput="onPaneInput(${i})" placeholder="Comece a digitar sua anotação no Vault aqui..."></div>
+                    <div class="flex-1 flex items-center justify-center text-xs text-gray-600 ${p.active ? 'hidden' : ''}">Nenhuma nota aberta neste painel. Use + para abrir uma.</div>
+                </div>`).join('');
+            L.panes.forEach((p, i) => {
+                const ed = host.querySelector(`.note-editor[data-pane="${i}"]`);
+                const note = p.active && state.notepad.find(n => n.id === p.active);
+                if (ed && note) {
+                    // Sanitiza tambem na LEITURA (notas antigas ou vindas de outra maquina).
+                    ed.innerHTML = sanitizarHtml(note.content || '');
+                    instalarSanitizacaoDoEditor(ed);
+                    hidratarQuadroDeTarefas(ed, note.id);
+                }
+            });
+            renderPaneTabbars();
+            refreshNoteHeader();
+            updateWordCount();
+        }
+
+        function refreshNoteHeader() {
+            const note = selectedNoteId && state.notepad.find(n => n.id === selectedNoteId);
+            const t = document.getElementById('noteTitleInput');
+            if (t) t.value = note ? (note.title || '') : '';
+            const btnIcon = document.getElementById('btn-current-note-icon');
+            if (btnIcon) btnIcon.innerHTML = `<i class="${(note && note.icon) || 'fa-regular fa-file-lines'} text-sm" ${estiloIconeNota(note)}></i>`;
+        }
+
+        function setFocusedPane(i) {
+            const L = ensureLayout();
+            if (L.focused === i || !L.panes[i]) return;
+            L.focused = i;
+            document.querySelectorAll('.note-pane').forEach(el => el.classList.toggle('foco', Number(el.dataset.pane) === i));
+            _syncSelected();
+            refreshNoteHeader();
+            updateWordCount();
+            renderNotepadTree();
+            saveState(false);
+        }
+
+        function activateTab(i, noteId) {
+            const L = ensureLayout();
+            if (!L.panes[i]) return;
+            L.focused = i;
+            L.panes[i].active = noteId;
+            saveState(false);
+            renderEditorPanes();
+            renderNotepadTree();
+        }
+
+        function closeTab(i, noteId) {
+            const L = ensureLayout();
+            const p = L.panes[i];
+            if (!p) return;
+            flushNoteSaves();
+            const idx = p.tabs.indexOf(noteId);
+            if (idx < 0) return;
+            p.tabs.splice(idx, 1);
+            if (p.active === noteId) p.active = p.tabs[Math.min(idx, p.tabs.length - 1)] || null;
+            if (p.tabs.length === 0 && L.panes.length > 1) {
+                L.panes.splice(i, 1);
+                L.focused = Math.min(L.focused, L.panes.length - 1);
+            }
+            saveState(false);
+            renderEditorPanes();
+            renderNotepadTree();
+        }
+
+        function splitPane() {
+            const L = ensureLayout();
+            if (L.panes.length >= MAX_PANES) { showToast('Máximo de ' + MAX_PANES + ' painéis lado a lado.'); return; }
+            flushNoteSaves();
+            const atual = L.panes[L.focused];
+            const nova = { tabs: atual.active ? [atual.active] : [], active: atual.active || null };
+            L.panes.splice(L.focused + 1, 0, nova);
+            L.focused += 1;
+            saveState(false);
+            renderEditorPanes();
+        }
+
+        function closePane(i) {
+            const L = ensureLayout();
+            if (L.panes.length <= 1 || !L.panes[i]) return;
+            flushNoteSaves();
+            L.panes.splice(i, 1);
+            L.focused = Math.min(L.focused, L.panes.length - 1);
+            saveState(false);
+            renderEditorPanes();
+            renderNotepadTree();
+        }
+
+        function openNoteInPane(i, noteId) {
+            const L = ensureLayout();
+            const p = L.panes[i];
+            if (!p || !state.notepad.some(n => n.id === noteId)) return;
+            flushNoteSaves();
+            if (!p.tabs.includes(noteId)) p.tabs.push(noteId);
+            p.active = noteId;
+            L.focused = i;
+            if (revelarNota(noteId)) { /* ramo aberto; salvo abaixo */ }
+            saveState(false);
+            renderEditorPanes();
+            renderNotepadTree();
+        }
+
+        /* Seletor flutuante: lista as notas para abrir como nova aba. */
+        function openPanePicker(i, event) {
+            event.stopPropagation();
+            closePanePicker();
+            const box = document.createElement('div');
+            box.id = 'pane-picker';
+            box.className = 'fixed z-50 w-64 max-h-80 overflow-y-auto bg-[#0f0f0f] border border-[#262626] rounded-lg shadow-2xl p-1.5 text-xs';
+            const r = event.currentTarget.getBoundingClientRect();
+            box.style.left = Math.min(r.left, window.innerWidth - 270) + 'px';
+            box.style.top = (r.bottom + 4) + 'px';
+            box.onclick = e => e.stopPropagation();
+            box.innerHTML = `<input id="pane-picker-search" type="text" placeholder="Buscar nota..." class="w-full mb-1 px-2 py-1.5 bg-white/5 border border-transparent focus:border-white/20 rounded text-xs text-gray-200 focus:outline-none">
+                             <div id="pane-picker-list"></div>`;
+            document.body.appendChild(box);
+            const lista = box.querySelector('#pane-picker-list');
+            const pintar = (q) => {
+                const t = (q || '').toLowerCase();
+                const itens = state.notepad.filter(n => !t || (n.title || '').toLowerCase().includes(t)).slice(0, 60);
+                lista.innerHTML = `<button data-novo="1" class="w-full text-left px-2 py-1.5 rounded hover:bg-white/10 text-gray-200 flex items-center gap-2 cursor-pointer"><i class="fa-solid fa-plus text-[10px]"></i> Nova nota</button>` +
+                    itens.map(n => `<button data-id="${n.id}" class="w-full text-left px-2 py-1.5 rounded hover:bg-white/10 text-gray-300 flex items-center gap-2 cursor-pointer">
+                        <i class="${n.icon || 'fa-regular fa-file-lines'} cg-keep text-[11px]" ${estiloIconeNota(n)}></i><span class="truncate">${escapeHtml(n.title || 'Sem título')}</span></button>`).join('');
+            };
+            pintar('');
+            box.querySelector('#pane-picker-search').oninput = e => pintar(e.target.value);
+            box.querySelector('#pane-picker-search').focus();
+            lista.onclick = e => {
+                const b = e.target.closest('button');
+                if (!b) return;
+                closePanePicker();
+                if (b.dataset.novo) { setFocusedPane(i); addRootNote(); return; }
+                openNoteInPane(i, b.dataset.id);
+            };
+        }
+
+        function closePanePicker() {
+            const b = document.getElementById('pane-picker');
+            if (b) b.remove();
+        }
+        document.addEventListener('click', closePanePicker);
+
+        /* Arrastar uma aba de um painel para outro. */
+        let dragTab = null;
+        function tabDragStart(event, i, noteId) {
+            dragTab = { de: i, id: noteId };
+            event.dataTransfer.effectAllowed = 'move';
+            try { event.dataTransfer.setData('text/plain', noteId); } catch (e) {}
+        }
+        function paneDragOver(event) {
+            if (dragTab) event.preventDefault();
+        }
+        function paneDrop(event, para) {
+            if (!dragTab) return;
+            event.preventDefault();
+            const { de, id } = dragTab;
+            dragTab = null;
+            if (de === para) return;
+            const L = ensureLayout();
+            const origem = L.panes[de], destino = L.panes[para];
+            if (!origem || !destino) return;
+            flushNoteSaves();
+            origem.tabs = origem.tabs.filter(t => t !== id);
+            if (origem.active === id) origem.active = origem.tabs[origem.tabs.length - 1] || null;
+            if (!destino.tabs.includes(id)) destino.tabs.push(id);
+            destino.active = id;
+            L.focused = para;
+            if (origem.tabs.length === 0 && L.panes.length > 1) {
+                L.panes.splice(de, 1);
+                L.focused = L.panes.indexOf(destino);
+            }
+            saveState(false);
+            renderEditorPanes();
+            renderNotepadTree();
+        }
+
+        function onPaneInput(i) {
+            setFocusedPane(i);
+            updateWordCount();
+            if (paneSaveTimers[i]) clearTimeout(paneSaveTimers[i]);
+            paneSaveTimers[i] = setTimeout(() => {
+                paneSaveTimers[i] = null;
+                const p = ensureLayout().panes[i];
+                const ed = document.querySelector(`.note-editor[data-pane="${i}"]`);
+                const note = p && p.active && state.notepad.find(n => n.id === p.active);
+                if (!ed || !note) return;
+                note.content = sanitizarHtml(ed.innerHTML);
+                saveState(false);
+                // Mesma nota aberta em outro painel: mantem os dois iguais.
+                ensureLayout().panes.forEach((q, j) => {
+                    if (j === i || q.active !== note.id) return;
+                    const outro = document.querySelector(`.note-editor[data-pane="${j}"]`);
+                    if (outro && document.activeElement !== outro) { outro.innerHTML = sanitizarHtml(note.content); hidratarQuadroDeTarefas(outro, note.id); }
+                });
+            }, 800);
+        }
+
         function selectNote(noteId) {
             const note = state.notepad.find(n => n.id === noteId);
             if (!note) return;
-            selectedNoteId = noteId;
-
-            // Se a nota estiver dentro de um ramo recolhido, abre o caminho até ela.
-            if (revelarNota(noteId)) saveState(false);
-
-            document.getElementById('noteTitleInput').value = note.title || '';
-            // Sanitiza tambem na LEITURA: notas criadas em versoes anteriores,
-            // ou sincronizadas de outra maquina, podem ja conter HTML perigoso.
-            document.getElementById('noteEditorBody').innerHTML =
-                sanitizarHtml(note.content || '');
-            instalarSanitizacaoDoEditor();
-            
-            const btnIcon = document.getElementById('btn-current-note-icon');
-            if (btnIcon) {
-                btnIcon.innerHTML = `<i class="${note.icon || 'fa-regular fa-file-lines'} text-sm"></i>`;
-            }
-
-            updateWordCount();
+            const L = ensureLayout();
+            flushNoteSaves();
+            // Ja aberta num painel? So foca. Senao entra como aba no painel em foco.
+            let alvo = L.panes.findIndex(p => p.tabs.includes(noteId));
+            if (alvo < 0 || (alvo !== L.focused && L.panes[L.focused].tabs.length === 0)) alvo = L.focused;
+            const p = L.panes[alvo];
+            if (!p.tabs.includes(noteId)) p.tabs.push(noteId);
+            p.active = noteId;
+            L.focused = alvo;
+            // Se a nota estiver dentro de um ramo recolhido, abre o caminho ate ela.
+            revelarNota(noteId);
+            saveState(false);
+            renderEditorPanes();
             renderNotepadTree();
         }
 
@@ -4575,15 +5807,17 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
         function deleteCurrentNote() {
             if (!selectedNoteId) return;
-            state.notepad = state.notepad.filter(n => n.id !== selectedNoteId && n.parentId !== selectedNoteId);
-            selectedNoteId = state.notepad[0]?.id || null;
-            saveState(true, true);
-            renderNotepadTree();
-            if (selectedNoteId) selectNote(selectedNoteId);
-            else {
-                document.getElementById('noteTitleInput').value = '';
-                document.getElementById('noteEditorBody').innerHTML = '';
+            const apagar = selectedNoteId;
+            state.notepad = state.notepad.filter(n => n.id !== apagar && n.parentId !== apagar);
+            const L = ensureLayout();
+            if (!focusedPane().active && state.notepad.length > 0) {
+                const p = focusedPane();
+                p.tabs.push(state.notepad[0].id);
+                p.active = state.notepad[0].id;
             }
+            saveState(true, true);
+            renderEditorPanes();
+            renderNotepadTree();
         }
 
         let debounceNoteTitle = null;
@@ -4596,33 +5830,38 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     note.title = document.getElementById('noteTitleInput').value;
                     saveState(false);
                     renderNotepadTree();
+                    renderPaneTabbars();
                 }
             }, 500);
         }
 
-        let debounceNoteContent = null;
         function saveNoteContentLive() {
-            updateWordCount();
-            if (debounceNoteContent) clearTimeout(debounceNoteContent);
-            debounceNoteContent = setTimeout(() => {
-                if (!selectedNoteId) return;
-                const note = state.notepad.find(n => n.id === selectedNoteId);
-                if (note) {
-                    note.content = sanitizarHtml(
-                        document.getElementById('noteEditorBody').innerHTML);
-                    saveState(false);
-                }
-            }, 800);
+            // Mantido por compatibilidade: dispara o salvamento do painel em foco.
+            onPaneInput(ensureLayout().focused);
+        }
+
+        function limparFormatacao() {
+            // removeFormat sozinho nao desfaz titulos (H1/H2): eles sao blocos,
+            // nao formatacao inline. Volta o bloco para paragrafo tambem.
+            const ed = getFocusedEditor();
+            if (!ed) return;
+            ed.focus();
+            document.execCommand('removeFormat', false, null);
+            document.execCommand('formatBlock', false, '<p>');
+            saveNoteContentLive();
         }
 
         function formatDoc(cmd, val = null) {
+            const ed = getFocusedEditor();
+            if (!ed) return;
             document.execCommand(cmd, false, val);
-            document.getElementById('noteEditorBody').focus();
+            ed.focus();
             saveNoteContentLive();
         }
 
         function updateWordCount() {
-            const text = document.getElementById('noteEditorBody').innerText || '';
+            const ed = getFocusedEditor();
+            const text = (ed && ed.innerText) || '';
             const words = text.trim() ? text.trim().split(/\s+/).length : 0;
             const chars = text.length;
             document.getElementById('note-word-count').innerText = `${words} palavras • ${chars} caracteres`;
@@ -4637,12 +5876,24 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             selectedNoteId = noteId;
             const note = state.notepad.find(n => n.id === noteId);
             tempNoteIcon = note?.icon || 'fa-regular fa-file-lines';
+            tempNoteColor = (note && note.iconColor) || '';
 
             renderIconPicker('noteIconPickerContainer', tempNoteIcon, (iconClass) => {
                 tempNoteIcon = iconClass;
             });
+            renderNoteColorPicker();
 
             document.getElementById('noteIconModal').classList.remove('hidden');
+        }
+
+        let tempNoteColor = '';
+        function renderNoteColorPicker() {
+            const c = document.getElementById('noteIconColorPicker');
+            if (!c) return;
+            c.innerHTML = NOTE_ICON_CORES.map(k => `
+                <button type="button" title="${k.nome}" onclick="tempNoteColor='${k.hex}'; renderNoteColorPicker()"
+                        class="nx-corbtn ${tempNoteColor === k.hex ? 'on' : ''}" style="background:${k.hex}"></button>`).join('') +
+                `<button type="button" title="Padrão" onclick="tempNoteColor=''; renderNoteColorPicker()" class="nx-corbtn ${tempNoteColor === '' ? 'on' : ''} text-[9px] text-gray-400 flex items-center justify-center" style="background:transparent">A</button>`;
         }
 
         function closeNoteIconModal() {
@@ -4654,6 +5905,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             const note = state.notepad.find(n => n.id === selectedNoteId);
             if (note) {
                 note.icon = tempNoteIcon;
+                if (tempNoteColor) note.iconColor = tempNoteColor; else delete note.iconColor;
                 saveState(true, true);
                 selectNote(selectedNoteId);
             }
@@ -4698,49 +5950,6 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             colDone.innerHTML = done.map(t => createKanbanCardHTML(t)).join('');
         }
 
-        let catChartInstance = null;
-        let prioChartInstance = null;
-        function renderChartsView() {
-            const list = getFilteredTasks();
-            const catCtx = document.getElementById('chartCategories')?.getContext('2d');
-            const prioCtx = document.getElementById('chartPriorities')?.getContext('2d');
-            if (!catCtx || !prioCtx) return;
-
-            if (catChartInstance) catChartInstance.destroy();
-            if (prioChartInstance) prioChartInstance.destroy();
-
-            const catLabels = state.categories.map(c => c.name);
-            const catData = state.categories.map(c => list.filter(t => t.categoryId === c.id).length);
-
-            catChartInstance = new Chart(catCtx, {
-                type: 'doughnut',
-                data: {
-                    labels: catLabels,
-                    datasets: [{
-                        data: catData,
-                        backgroundColor: ['#2eaadc', '#7053ff', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6'],
-                        borderWidth: 0
-                    }]
-                },
-                options: { responsive: true, plugins: { legend: { labels: { color: '#8a8a8e', font: { size: 11 } } } } }
-            });
-
-            const prioLabels = ['Baixa', 'Média', 'Alta', 'Urgente'];
-            const prioData = prioLabels.map(p => list.filter(t => (t.priority || 'Média') === p).length);
-
-            prioChartInstance = new Chart(prioCtx, {
-                type: 'bar',
-                data: {
-                    labels: prioLabels,
-                    datasets: [{
-                        data: prioData,
-                        backgroundColor: ['#3b82f6', '#2eaadc', '#f59e0b', '#ef4444'],
-                        borderRadius: 3
-                    }]
-                },
-                options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { ticks: { color: '#71717a' }, grid: { color: '#2f2f2f' } }, x: { ticks: { color: '#8a8a8e' }, grid: { display: false } } } }
-            });
-        }
 
         function openCategoryModal(catId = null) {
             document.getElementById('editingCategoryId').value = catId || '';
@@ -4843,7 +6052,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     p.icon = selectedProjectIcon;
                 }
             } else {
-                state.projects.push({ id: 'proj-' + Date.now(), name: name, icon: selectedProjectIcon, color: '#2eaadc' });
+                state.projects.push({ id: 'proj-' + Date.now(), name: name, icon: selectedProjectIcon, color: '#4272c4' });
             }
 
             saveState(true, true);
@@ -4868,7 +6077,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             const container = document.getElementById(containerId);
             if (!container) return;
             container.innerHTML = AVAILABLE_ICONS.map(ic => `
-                <button onclick="event.preventDefault(); selectIconInPicker('${containerId}', '${ic}')" class="p-2 text-center rounded border transition cursor-pointer ${ic === currentSelectedIcon ? 'border-[#2eaadc] bg-[#2eaadc]/20 text-white' : 'border-white/10 text-gray-400 hover:text-white hover:bg-white/5'}">
+                <button onclick="event.preventDefault(); selectIconInPicker('${containerId}', '${ic}')" class="p-2 text-center rounded border transition cursor-pointer ${ic === currentSelectedIcon ? 'border-[#4272c4] bg-[#4272c4]/20 text-white' : 'border-white/10 text-gray-400 hover:text-white hover:bg-white/5'}">
                     <i class="${ic} text-xs"></i>
                 </button>
             `).join('');
@@ -4888,8 +6097,8 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         function showToast(msg) {
             const container = document.getElementById('toastContainer');
             const toast = document.createElement('div');
-            toast.className = 'px-3.5 py-2 bg-[#202020] border border-[#2f2f2f] shadow-2xl text-white rounded text-xs font-semibold flex items-center gap-2 transition-all duration-200';
-            toast.innerHTML = `<i class="fa-solid fa-circle-check text-[#2eaadc]"></i> ${msg}`;
+            toast.className = 'px-3.5 py-2 bg-[#0a0a0a] border border-[#262626] shadow-2xl text-white rounded text-xs font-semibold flex items-center gap-2 transition-all duration-200';
+            toast.innerHTML = `<i class="fa-solid fa-circle-check text-[#4272c4]"></i> ${msg}`;
             container.appendChild(toast);
             setTimeout(() => toast.remove(), 2600);
         }
@@ -4983,10 +6192,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     badgeCount.innerText = totalAlerts > 99 ? '99+' : totalAlerts;
                     badgeCount.classList.remove('hidden');
                     if (totalCritical > 0) {
-                        badgeCount.className = "absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-rose-600 text-white font-bold text-[9px] rounded-full border border-[#202020] shadow-sm animate-pulse";
+                        badgeCount.className = "absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-rose-600 text-white font-bold text-[9px] rounded-full border border-[#0a0a0a] shadow-sm animate-pulse";
                         if (bellIcon) bellIcon.className = "fa-solid fa-bell text-rose-400 text-xs";
                     } else {
-                        badgeCount.className = "absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-amber-500 text-white font-bold text-[9px] rounded-full border border-[#202020] shadow-sm";
+                        badgeCount.className = "absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-amber-500 text-white font-bold text-[9px] rounded-full border border-[#0a0a0a] shadow-sm";
                         if (bellIcon) bellIcon.className = "fa-solid fa-bell text-amber-400 text-xs";
                     }
                 } else {
@@ -5289,6 +6498,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 cloudInfo = await window.pywebview.api.cloud_status();
                 pintarBadgeNuvem();
                 pintarModalNuvem();
+                renderProfile();
             } catch (e) { console.warn('cloud_status:', e); }
         }
 
@@ -5305,14 +6515,16 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             if (!cloudInfo.signedIn) {
                 if (ic) ic.className = 'fa-solid fa-cloud-arrow-up text-[11px] text-amber-400';
                 if (ponto) ponto.className = 'w-2 h-2 rounded-full bg-amber-500 shadow-sm';
-                alvo.innerText = 'Sem conta conectada';
+                alvo.innerText = 'Sem conta';
                 alvo.style.color = '#fbbf24';
+                alvo.classList.remove('hidden');
                 if (barra) barra.title = 'Clique para entrar na sua conta';
             } else {
                 if (ic) ic.className = 'fa-solid fa-cloud text-[11px] text-emerald-400';
                 if (ponto) ponto.className = 'w-2 h-2 rounded-full bg-emerald-500 shadow-sm';
-                alvo.innerText = nomeDoBanco();
+                alvo.innerText = '';
                 alvo.style.color = '';
+                alvo.classList.add('hidden');
                 if (barra) barra.title = `Conta: ${cloudInfo.email}`;
             }
         }
@@ -5334,18 +6546,14 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 return;
             }
             if (dot) dot.className = 'w-2 h-2 rounded-full bg-emerald-500 shadow-sm';
+            const barraPop = document.getElementById('dbStatusBar');
+            if (barraPop && (evento === 'enviado' || evento === 'atualizado')) {
+                barraPop.classList.remove('nx-cloud-pop'); void barraPop.offsetWidth; barraPop.classList.add('nx-cloud-pop');
+            }
 
             if (evento === 'enviado')       lbl.innerText = `Enviado às ${t}`;
             else if (evento === 'atualizado') lbl.innerText = `Atualizado às ${t}`;
             else                              lbl.innerText = 'Sincronizado';
-        }
-
-        /* Nome curto do banco a partir da URL, sem expor UID nem caminho. */
-        function nomeDoBanco() {
-            try {
-                const m = String(cloudInfo.databaseURL || '').match(/https?:\/\/([^.]+)/);
-                return m ? ('Firebase · ' + m[1]) : 'Firebase';
-            } catch (e) { return 'Firebase'; }
         }
 
         function pintarModalNuvem() {
@@ -5497,6 +6705,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             const g = document.getElementById('loginGate');
             if (!g) return;
             g.classList.remove('hidden'); g.classList.add('flex');
+            splashHide();
             setTimeout(() => { const e = document.getElementById('gateEmail'); if (e) e.focus(); }, 80);
         }
         function esconderGate() {
@@ -5720,7 +6929,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     const box = document.getElementById('updStatusBox');
                     if (box) box.innerHTML = '<span class="text-rose-400"><i class="fa-solid fa-circle-xmark mr-1"></i> '
                         + escapeHtml(p.mensagem || 'Falha na atualizacao.') + '</span>';
-                    if (bar) bar.classList.replace('bg-[#2eaadc]', 'bg-rose-500');
+                    if (bar) bar.classList.replace('bg-[#4272c4]', 'bg-rose-500');
                     const btn = document.getElementById('updBtnInstall');
                     if (btn) { btn.disabled = false; btn.classList.remove('opacity-50'); }
                 } else if (p.fase === 'installing') {
@@ -5778,8 +6987,47 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             'TABLE','THEAD','TBODY','TFOOT','TR','TD','TH','CAPTION','FONT'
         ]);
         const ATRIBUTOS_PERMITIDOS = new Set([
-            'href','title','colspan','rowspan','align','color','face','start','type'
+            'href','title','colspan','rowspan','align','color','face','start','type','data-nx-tasks',
+            // 'style' entra, mas nunca cru: passa por sanitizarEstilo(). Sem
+            // isso o Marca-texto (hiliteColor gera <span style="background-color">)
+            // era apagado ao salvar e ao reabrir a nota.
+            'style'
         ]);
+
+        const CSS_PERMITIDO = new Set([
+            'background-color', 'background', 'color',
+            'font-weight', 'font-style', 'font-size', 'font-family',
+            'text-decoration', 'text-decoration-line', 'text-align'
+        ]);
+        const CSS_VALOR_OK = new RegExp(
+            '^(' +
+              'rgba?\\([0-9,.%\\s]+\\)' +
+              '|#[0-9a-fA-F]{3,8}' +
+              '|[a-zA-Z]+' +
+              '|[0-9.]+(px|pt|em|rem|%)' +
+              '|[a-zA-Z0-9 ,\'"\\-]+' +
+            ')$'
+        );
+
+        function sanitizarEstilo(valor) {
+            const bruto = String(valor || '');
+            const minusculo = bruto.toLowerCase();
+            const proibido = ['url(', 'expression(', 'javascript:', '@import', '\\', '/*', '*/', '<'];
+            for (const p of proibido) {
+                if (minusculo.indexOf(p) !== -1) return '';
+            }
+            const saida = [];
+            for (const decl of bruto.split(';')) {
+                const i = decl.indexOf(':');
+                if (i < 0) continue;
+                const prop = decl.slice(0, i).trim().toLowerCase();
+                const val = decl.slice(i + 1).trim();
+                if (!prop || !val || !CSS_PERMITIDO.has(prop)) continue;
+                if (val.length > 120 || !CSS_VALOR_OK.test(val)) continue;
+                saida.push(prop + ': ' + val);
+            }
+            return saida.join('; ');
+        }
 
         function _urlSegura(v) {
             /* Remove espacos e caracteres de controle antes de testar: o truque
@@ -5817,10 +7065,22 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     if (nome === 'href' && !_urlSegura(attr.value)) {
                         no.removeAttribute(attr.name);
                     }
+                    if (nome === 'style') {
+                        const limpo = sanitizarEstilo(attr.value);
+                        if (limpo) no.setAttribute('style', limpo);
+                        else no.removeAttribute('style');
+                    }
                 }
 
                 if (tag === 'A' && no.getAttribute('href')) {
                     no.setAttribute('rel', 'noopener noreferrer');
+                }
+
+                /* Quadro de tarefas: so o marcador e salvo. O conteudo e montado
+                   a partir de state.tasks ao abrir a nota (nunca fica defasado). */
+                if (no.hasAttribute('data-nx-tasks')) {
+                    if (tag === 'DIV') { no.setAttribute('data-nx-tasks', '1'); no.textContent = ''; }
+                    else no.removeAttribute('data-nx-tasks');
                 }
             }
 
@@ -5841,8 +7101,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
         /* Intercepta o colar e o arrastar: limpa ANTES de entrar no documento,
            para que o HTML sujo nunca chegue a ser gravado. */
-        function instalarSanitizacaoDoEditor() {
-            const ed = document.getElementById('noteEditorBody');
+        function instalarSanitizacaoDoEditor(ed) {
             if (!ed || ed.dataset.sanitizado === '1') return;
             ed.dataset.sanitizado = '1';
 
@@ -5886,7 +7145,7 @@ def main():
         api = NexusDesktopAPI()
         window = webview.create_window(
             title='NEXUS',
-            html=HTML_CONTENT,
+            url=_escrever_ui_local('index.html', HTML_CONTENT.replace('__APP_VERSION__', APP_VERSION)),
             js_api=api,
             width=1320,
             height=850,

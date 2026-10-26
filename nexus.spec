@@ -12,7 +12,7 @@ a = Analysis(
     ['nexus.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('vendor', 'vendor')],
     hiddenimports=['certifi'],
     hookspath=[],
     hooksconfig={},

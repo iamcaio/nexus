@@ -285,7 +285,6 @@ $dotted = "$Version.0"
 # --- Monta TUDO na memoria primeiro. So depois grava. ---
 $py = Read-TextFile "nexus.py"
 $py = Invoke-Regex $py 'APP_VERSION = "v[\d\.]+"' "APP_VERSION = `"v$Version`"" 'nexus.py APP_VERSION'
-$py = Invoke-Regex $py '>v[\d\.]+</button>'       ">v$Version</button>"          'nexus.py badge do header'
 
 $vi = Read-TextFile "version_info.txt"
 $vi = Invoke-Regex $vi 'filevers=\([\d, ]+\)' "filevers=($quad)" 'version_info filevers'

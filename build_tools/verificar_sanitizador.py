@@ -230,12 +230,12 @@ def main():
     pontos = [
         (r"insertHTML['\"]\s*,\s*false\s*,\s*sanitizarHtml\(html\)",
          "ao colar / arrastar — limpa antes de entrar no documento"),
-        (r"noteEditorBody'\)\.innerHTML\s*=\s*\n?\s*sanitizarHtml",
+        (r"ed\.innerHTML\s*=\s*sanitizarHtml\(note\.content",
          "ao abrir a nota — limpa notas antigas ja contaminadas"),
         (r"note\.content\s*=\s*sanitizarHtml",
          "ao salvar a nota — ultima barreira antes do disco e da nuvem"),
-        (r"instalarSanitizacaoDoEditor\(\)",
-         "instalacao dos interceptadores no boot"),
+        (r"instalarSanitizacaoDoEditor\(ed\)",
+         "instalacao dos interceptadores em cada editor (painel) criado"),
     ]
     for padrao, desc in pontos:
         if re.search(padrao, fonte):

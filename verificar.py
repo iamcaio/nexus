@@ -288,7 +288,6 @@ def checar_versoes_alinhadas():
 
     achados = {
         'nexus.py APP_VERSION': pega(py, r'APP_VERSION = "v([\d.]+)"'),
-        'nexus.py badge':       pega(py, r'>v([\d.]+)</button>'),
         'version_info.txt':     pega(vi, r"FileVersion', '([\d.]+)\.0'"),
         'nexus_installer.iss':  pega(iss, r'MyAppVersion\s+"([\d.]+)"'),
     }
