@@ -38,7 +38,7 @@ param(
     [switch]$SkipInstaller,
     [switch]$OnlyVersion,
     [switch]$OnlyInstaller,
-    [string]$BaseUrl = "https://github.com/SEU-USUARIO/nexus/releases/download"
+    [string]$BaseUrl = "https://github.com/iamcaio/nexus/releases/download"
 )
 
 $ErrorActionPreference = "Stop"

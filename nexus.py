@@ -28,7 +28,7 @@ except Exception as e:
     show_native_error_dialog("Erro ao Iniciar - NEXUS", err_msg)
     sys.exit(1)
 
-APP_VERSION = "v6.3.7"
+APP_VERSION = "v6.3.17"
 
 # ---------------------------------------------------------------------------
 # NOTIFICAÇÕES DESKTOP E ÍCONE NA BARRA DE TAREFAS (WINDOWS)
@@ -53,6 +53,164 @@ APP_VERSION = "v6.3.7"
 # silenciosa: elas voltam a aparecer como PowerShell.
 # ---------------------------------------------------------------------------
 APP_AUMID = "iamcaio.NEXUS"
+
+_CHROME_ATIVO = False
+_chrome_refs = []  # evita o GC do callback do WndProc
+
+
+def _instalar_chrome_unico(window):
+    """
+    Remove a barra de titulo nativa do Windows (area nao-cliente) mantendo
+    sombra, snap e redimensionamento. O header do app vira a unica barra.
+    """
+    global _CHROME_ATIVO
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u32 = ctypes.windll.user32
+        hwnd = int(window.native.Handle.ToInt64())
+        LRESULT = ctypes.c_ssize_t
+        WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+        u32.GetWindowLongPtrW.restype = ctypes.c_void_p
+        u32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+        u32.SetWindowLongPtrW.restype = ctypes.c_void_p
+        u32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+        u32.CallWindowProcW.restype = LRESULT
+        u32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        u32.DefWindowProcW.restype = LRESULT
+        u32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        u32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+        WM_NCCALCSIZE, WM_NCHITTEST, WM_GETMINMAXINFO = 0x0083, 0x0084, 0x0024
+        WM_SIZE, WM_MOVE = 0x0005, 0x0003
+        WS_CAPTION = 0x00C00000
+        BORDA = 6
+        # Sem barra nativa o WinForms reaplica o tamanho a cada restauracao e a janela
+        # cresce; guardamos o retangulo normal e o reimpomos ao sair de min/max.
+        est = {"saved": None, "prev": 0, "lock": 0.0}
+
+        def _reimpor(h):
+            if est["saved"] and not u32.IsZoomed(h) and not u32.IsIconic(h):
+                x, y, w, hh = est["saved"]
+                u32.SetWindowPos(h, 0, x, y, w, hh, 0x0004 | 0x0010)
+
+        def _guardar(h):
+            # Ignora o que acontece logo apos restaurar: e o crescimento espurio.
+            if time.time() < est["lock"]:
+                return
+            if not u32.IsZoomed(h) and not u32.IsIconic(h):
+                r = wintypes.RECT()
+                u32.GetWindowRect(h, ctypes.byref(r))
+                est["saved"] = (r.left, r.top, r.right - r.left, r.bottom - r.top)
+        orig = u32.GetWindowLongPtrW(hwnd, -4)
+        u32.MonitorFromRect.restype = ctypes.c_void_p
+        u32.MonitorFromRect.argtypes = [ctypes.POINTER(wintypes.RECT), wintypes.DWORD]
+        u32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+
+        class MINMAXINFO(ctypes.Structure):
+            _fields_ = [("ptReserved", wintypes.POINT), ("ptMaxSize", wintypes.POINT),
+                        ("ptMaxPosition", wintypes.POINT), ("ptMinTrackSize", wintypes.POINT),
+                        ("ptMaxTrackSize", wintypes.POINT)]
+
+        def _monitor_info(rect):
+            """MONITORINFO do monitor que contem `rect` (ou o mais proximo)."""
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            hmon = u32.MonitorFromRect(ctypes.byref(rect), 2)  # NEAREST
+            if not hmon or not u32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                return None
+            return mi
+
+        def _sem_borda(h):
+            # Fullscreen do pywebview/WinForms remove WS_CAPTION: nesse modo a janela
+            # deve cobrir o monitor inteiro, entao nao interferimos.
+            return not (u32.GetWindowLongPtrW(h, -16) or 0) & WS_CAPTION
+
+        def proc(h, msg, wp, lp):
+            try:
+                if msg == WM_SIZE:
+                    res = u32.CallWindowProcW(orig, h, msg, wp, lp)
+                    if wp in (1, 2):
+                        est["prev"] = wp
+                    elif wp == 0:
+                        if est["prev"] and est["saved"]:
+                            est["prev"] = 0
+                            est["lock"] = time.time() + 1.0
+                            _reimpor(h)
+                            # O WinForms reaplica o tamanho um pouco depois: reimpoe de novo.
+                            for atraso in (0.1, 0.3, 0.7):
+                                threading.Timer(atraso, _reimpor, (h,)).start()
+                        else:
+                            _guardar(h)
+                    return res
+                if msg == WM_MOVE:
+                    res = u32.CallWindowProcW(orig, h, msg, wp, lp)
+                    if not est["prev"]:
+                        _guardar(h)
+                    return res
+                if msg == WM_GETMINMAXINFO and lp and not _sem_borda(h):
+                    # Define de forma deterministica onde/quanto a janela ocupa ao
+                    # maximizar: exatamente a area de trabalho do monitor atual.
+                    # Evita a janela "estourar" ao voltar de minimizada/maximizada.
+                    r = wintypes.RECT()
+                    u32.GetWindowRect(h, ctypes.byref(r))
+                    if r.left <= -30000:  # minimizada: usa o monitor primario
+                        r = wintypes.RECT(0, 0, 1, 1)
+                    mi = _monitor_info(r)
+                    if mi:
+                        info = ctypes.cast(lp, ctypes.POINTER(MINMAXINFO))[0]
+                        info.ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left
+                        info.ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top
+                        info.ptMaxSize.x = mi.rcWork.right - mi.rcWork.left
+                        info.ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top
+                    return 0
+                if msg == WM_NCCALCSIZE and wp:
+                    # Sem barra nativa: a area cliente e a janela inteira. Nao mexe
+                    # no retangulo quando minimizada ou em fullscreen sem borda.
+                    if u32.IsZoomed(h) and not u32.IsIconic(h) and not _sem_borda(h):
+                        # Maximizada: limita ao work area (respeita a barra de tarefas).
+                        # Usa o retangulo PROPOSTO para achar o monitor (nao o da janela).
+                        rc = ctypes.cast(lp, ctypes.POINTER(wintypes.RECT))
+                        mi = _monitor_info(rc[0])
+                        if mi:
+                            rc[0] = mi.rcWork
+                    return 0
+                if msg == WM_NCHITTEST and not u32.IsZoomed(h):
+                    x = ctypes.c_short(lp & 0xFFFF).value
+                    y = ctypes.c_short((lp >> 16) & 0xFFFF).value
+                    wr = wintypes.RECT()
+                    u32.GetWindowRect(h, ctypes.byref(wr))
+                    esq, dir_ = x < wr.left + BORDA, x >= wr.right - BORDA
+                    top, bot = y < wr.top + BORDA, y >= wr.bottom - BORDA
+                    if top and esq: return 13
+                    if top and dir_: return 14
+                    if bot and esq: return 16
+                    if bot and dir_: return 17
+                    if esq: return 10
+                    if dir_: return 11
+                    if top: return 12
+                    if bot: return 15
+            except Exception:
+                pass
+            return u32.CallWindowProcW(orig, h, msg, wp, lp)
+
+        _guardar(hwnd)
+        cb = WNDPROC(proc)
+        _chrome_refs.append(cb)
+        u32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(cb, ctypes.c_void_p))
+        # NOMOVE|NOSIZE|NOZORDER|NOACTIVATE|FRAMECHANGED
+        u32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+        _CHROME_ATIVO = True
+        try:  # cantos arredondados do Win11
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(ctypes.c_int(2)), 4)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[NEXUS] Barra unica indisponivel: {e}")
 
 
 def _registrar_identidade_windows():
@@ -360,6 +518,12 @@ UPDATE_MANIFEST_URL = (
 # Intervalo minimo entre checagens automaticas (segundos). 6 horas.
 UPDATE_CHECK_INTERVALO = 6 * 60 * 60
 
+# Segunda fonte de atualizacao: o ultimo Release publicado no GitHub. Vale a
+# MAIOR versao entre o Firebase (/stable) e o GitHub; em empate, o Firebase
+# (traz sha256 independente do host do binario e o aviso "mandatory").
+GITHUB_REPO = "iamcaio/nexus"
+GITHUB_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
 # Tamanho maximo aceito para o download, em bytes. Barreira contra um
 # manifesto adulterado apontando para um arquivo gigante (DoS de disco).
 UPDATE_TAMANHO_MAX = 400 * 1024 * 1024
@@ -448,19 +612,57 @@ class AutoUpdater:
         st, corpo = _http_json(UPDATE_MANIFEST_URL, timeout=12, ctx=_ssl_ctx_strict)
         self.ultima_checagem = agora
 
-        if st != 200:
+        fb = corpo if (st == 200 and isinstance(corpo, dict) and corpo.get("version")) else None
+        gh = self._consultar_github()
+
+        if st != 200 and not gh:
             self.ultimo_erro = f"HTTP {st} ao ler o manifesto."
             return {"status": "error", "current": APP_VERSION,
                     "message": "Nao foi possivel consultar atualizacoes agora. "
                                "Verifique a conexao."}
-        if not isinstance(corpo, dict) or not corpo.get("version"):
-            # Nó ausente ou vazio: nao e erro do usuario, so nao ha release.
+
+        escolhido = fb
+        if gh and (not fb or _versao_maior(gh["version"], fb["version"])):
+            escolhido = gh
+        if not escolhido:
+            # Nó ausente e sem Release: nao e erro do usuario, so nao ha versao nova.
             self.manifesto = None
             return {"status": "up_to_date", "current": APP_VERSION,
                     "message": "Nenhuma atualizacao publicada."}
 
-        self.manifesto = corpo
+        self.manifesto = escolhido
         return self._resposta_do_manifesto()
+
+    def _consultar_github(self):
+        """
+        Le o ultimo Release do GitHub e devolve um manifesto no mesmo formato do
+        Firebase, ou None. O hash vem do campo 'digest' do asset (sha256:...);
+        sem ele o Release e ignorado, porque a instalacao exige SHA-256.
+        """
+        try:
+            st, rel = _http_json(GITHUB_RELEASE_URL, timeout=12, ctx=_ssl_ctx_strict)
+            if st != 200 or not isinstance(rel, dict) or rel.get("draft") or rel.get("prerelease"):
+                return None
+            versao = str(rel.get("tag_name") or "").strip().lstrip("vV")
+            if not versao:
+                return None
+            for a in rel.get("assets") or []:
+                nome = str(a.get("name") or "")
+                url = str(a.get("browser_download_url") or "")
+                digest = str(a.get("digest") or "")
+                if not (nome.lower().startswith("nexus-setup") and nome.lower().endswith(".exe")):
+                    continue
+                if not url.startswith(f"https://github.com/{GITHUB_REPO}/releases/download/"):
+                    continue
+                if not digest.lower().startswith("sha256:") or len(digest) != 71:
+                    continue
+                return {"version": versao, "kind": "installer", "url": url,
+                        "sha256": digest[7:].lower(), "size": int(a.get("size") or 0),
+                        "notes": str(rel.get("body") or "").strip()[:2000],
+                        "mandatory": False, "source": "github"}
+        except Exception:
+            pass
+        return None
 
     def _resposta_do_manifesto(self):
         m = self.manifesto or {}
@@ -1121,7 +1323,8 @@ SPOTIFY_PORT = 8898
 SPOTIFY_REDIRECT = "http://127.0.0.1:%d/callback" % SPOTIFY_PORT
 SPOTIFY_SCOPES = ("streaming user-read-email user-read-private user-read-playback-state "
                   "user-modify-playback-state user-read-currently-playing "
-                  "playlist-read-private playlist-read-collaborative user-library-read")
+                  "playlist-read-private playlist-read-collaborative user-library-read "
+                  "playlist-modify-public playlist-modify-private")
 
 _SPOTIFY_PLAYER_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>NEXUS Player</title></head><body>
 <script>
@@ -1481,6 +1684,86 @@ class NexusDesktopAPI:
     def set_window(self, window):
         self._window = window
 
+    # --- Controles da janela (barra unica) ---
+    def win_chrome(self):
+        return bool(_CHROME_ATIVO)
+
+    def _hwnd(self):
+        return int(self._window.native.Handle.ToInt64())
+
+    def win_minimize(self):
+        import ctypes
+        ctypes.windll.user32.ShowWindow(self._hwnd(), 6)
+
+    def win_toggle_maximize(self):
+        import ctypes
+        u = ctypes.windll.user32
+        h = self._hwnd()
+        u.ShowWindow(h, 9 if u.IsZoomed(h) else 3)
+        return bool(u.IsZoomed(h))
+
+    def win_is_maximized(self):
+        import ctypes
+        return bool(ctypes.windll.user32.IsZoomed(self._hwnd()))
+
+    def win_close(self):
+        self._window.destroy()
+
+    # Mover/redimensionar: o WebView2 engole o mouse na area cliente, entao o
+    # arraste e dirigido pelo JS (begin/step) lendo o cursor global aqui.
+    def _cur(self):
+        import ctypes
+        from ctypes import wintypes
+        pt = wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        return pt.x, pt.y
+
+    def _rect(self):
+        import ctypes
+        from ctypes import wintypes
+        r = wintypes.RECT()
+        ctypes.windll.user32.GetWindowRect(self._hwnd(), ctypes.byref(r))
+        return r.left, r.top, r.right, r.bottom
+
+    def win_drag_begin(self, edge=""):
+        self._drag = {"edge": edge, "cur": self._cur(), "rect": self._rect(), "restored": False}
+
+    def win_drag_step(self):
+        import ctypes
+        u = ctypes.windll.user32
+        d = getattr(self, "_drag", None)
+        if not d:
+            return
+        cx, cy = self._cur()
+        dx, dy = cx - d["cur"][0], cy - d["cur"][1]
+        l, t, r, b = d["rect"]
+        h = self._hwnd()
+        flags = 0x0004 | 0x0010  # NOZORDER | NOACTIVATE
+        if not d["edge"]:
+            if u.IsZoomed(h):
+                if abs(dx) + abs(dy) < 4:
+                    return
+                w0 = r - l
+                u.ShowWindow(h, 9)  # restaura e recentra sob o cursor
+                l2, t2, r2, b2 = self._rect()
+                nl, nt = int(cx - (cx - l) / max(w0, 1) * (r2 - l2)), max(cy - 20, 0)
+                d["rect"] = (nl, nt, nl + (r2 - l2), nt + (b2 - t2))
+                d["cur"] = (cx, cy)
+                u.SetWindowPos(h, 0, nl, nt, 0, 0, flags | 0x0001)
+                return
+            u.SetWindowPos(h, 0, l + dx, t + dy, 0, 0, flags | 0x0001)  # NOSIZE
+            return
+        e = d["edge"]
+        MINW, MINH = 960, 640
+        if "w" in e: l = min(l + dx, r - MINW)
+        if "e" in e: r = max(r + dx, l + MINW)
+        if "n" in e: t = min(t + dy, b - MINH)
+        if "s" in e: b = max(b + dy, t + MINH)
+        u.SetWindowPos(h, 0, l, t, r - l, b - t, flags)
+
+    def win_drag_end(self):
+        self._drag = None
+
     # ------------------------------------------------------------------ #
     # Painel Spotify (opcao 3)
     # ------------------------------------------------------------------ #
@@ -1639,6 +1922,7 @@ class NexusDesktopAPI:
                             "client_id": api._sp_cfg().get("client_id", ""), "code_verifier": auth["verifier"]})
                         if status == 200 and j.get("refresh_token"):
                             st["access"], st["exp"] = j.get("access_token", ""), time.time() + int(j.get("expires_in", 3600))
+                            api._sp_cfg()["scope"] = str(j.get("scope", ""))     # escopos realmente concedidos
                             api._sp_refresh_set(j["refresh_token"])
                             st["auth"], st["erro"], ok = None, None, True
                         else:
@@ -1695,8 +1979,10 @@ class NexusDesktopAPI:
         st = self._sp_st()
         cfg = self._sp_cfg()
         conectado = bool(self._sp_refresh_get())
+        faltam = set(SPOTIFY_SCOPES.split()) - set(str(cfg.get("scope", "")).split())
         out = {"clientId": bool(cfg.get("client_id")), "connected": conectado, "redirect": SPOTIFY_REDIRECT,
-               "erro": st["erro"], "playerUrl": None}
+               "erro": st["erro"], "playerUrl": None,
+               "reauth": bool(conectado and faltam)}      # login antigo, sem permissao de editar playlists
         if conectado and self._sp_servidor():
             out["playerUrl"] = "http://127.0.0.1:%d/player?n=%s" % (SPOTIFY_PORT, st["nonce"])
             out["erro"] = st["erro"]
@@ -2334,6 +2620,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     <link rel="stylesheet" href="__VENDOR__/tailwind.local.css">
     <link rel="stylesheet" href="__VENDOR__/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="__VENDOR__/fonts/inter.css">
+    <link rel="stylesheet" href="__VENDOR__/fonts/google-sans-flex.css">
 
     <style>
         
@@ -2368,7 +2655,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         .rounded.border.w-4, .rounded.border.w-3\.5, .rounded.border.w-5 { border-radius: 6px !important; }
         input[type="checkbox"] { border-radius: 6px; }
         body {
-            font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
+            font-family: "Google Sans Flex", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
             background-color: #000000;
             color: #d3d3d3;
             user-select: none;
@@ -2519,8 +2806,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
 
         /* ---- Tipografia unica (mesmo padrao da barra lateral) em TODO o app ---- */
-        body { font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif !important; font-size: 14px; letter-spacing: -0.003em; }
-        .font-mono { font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', monospace !important; }
+        body, button, input, select, textarea { font-family: 'Google Sans Flex', 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif !important; }
+        body { font-family: 'Google Sans Flex', 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif !important; font-size: 14px; letter-spacing: -0.003em; }
+        .font-mono, .font-mono *, code, pre, kbd, samp { font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', monospace !important; }
+        .font-sans { font-family: 'Google Sans Flex', 'Inter', system-ui, sans-serif !important; }
         .text-xs { font-size: 14px !important; line-height: 1.45 !important; }
         .text-sm { font-size: 15px !important; line-height: 1.5 !important; }
         .text-\[9px\], .text-\[8px\] { font-size: 11px !important; }
@@ -2535,8 +2824,45 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         .note-toolbar .nt-title { flex: 1 1 240px; min-width: 0; display: flex; align-items: center; gap: 8px; order: 1; }
         .note-toolbar .nt-title input { min-width: 0; }
         .note-toolbar .nt-actions { flex: 0 0 auto; order: 2; margin-left: auto; }
-        .note-toolbar .nt-format { flex: 1 1 100%; order: 3; min-width: 0; }
+        .note-toolbar { container-type: inline-size; container-name: ntbar; }
+        .note-toolbar .nt-format { flex: 1 1 auto; order: 3; min-width: 0; }
+        .note-toolbar .nt-insert { flex: 0 1 auto; order: 4; min-width: 0; flex-wrap: wrap; }
+        .nt-ib { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 6px; color: #d3d3d3; white-space: nowrap; cursor: pointer; }
+        .nt-ib:hover { color: #fff; }
+        .nt-ins-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: #6b7280; padding: 0 2px 0 6px; }
+        .nt-cnt { font-size: 10px; font-family: 'JetBrains Mono', monospace; background: rgba(66,114,196,.25); color: #93b4ea; border-radius: 999px; padding: 0 6px; min-width: 16px; text-align: center; }
+        @container ntbar (max-width: 1000px) { .nt-insert .lbl, .nt-insert .nt-ins-label { display: none; } }
+        .nt-res { border-bottom: 1px solid #262626; background: #080808; padding: 6px clamp(12px, 3vw, 24px) 8px; flex-shrink: 0; }
+        .nt-res.hidden { display: none; }
+        .nt-res-head { display: flex; align-items: center; gap: 8px; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #8a8a8e; }
+        .nt-res-head b { font-family: 'JetBrains Mono', monospace; color: #9ca3af; }
+        .nt-res-btns { margin-left: auto; display: flex; gap: 4px; }
+        .nt-res-btns button { font-size: 11px; font-weight: 600; text-transform: none; letter-spacing: 0; color: #9ca3af; padding: 2px 8px; border-radius: 6px; cursor: pointer; }
+        .nt-res-btns button:hover { color: #fff; background: rgba(255,255,255,.07); }
+        .nt-res-form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+        .nt-res-form.hidden { display: none; }
+        .nt-res-body { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 6px; margin-top: 6px; min-height: 34px; max-height: min(32vh, 240px); overflow-y: auto; resize: vertical; }
+        .nt-res-empty { color: #6b7280; font-size: 12px; font-style: italic; padding: 6px 2px; }
+        .nt-chip { display: inline-flex; align-items: center; background: #111; border: 1px solid #262626; border-radius: 8px; max-width: 100%; }
+        .nt-chip:hover { border-color: #3a3a3a; }
+        .nt-chip-main { display: flex; align-items: center; gap: 6px; padding: 5px 4px 5px 9px; cursor: pointer; min-width: 0; color: #d3d3d3; font-size: 12px; }
+        .nt-chip-main:hover { color: #fff; }
+        .nt-chip-main i { color: #4272c4; font-size: 11px; flex-shrink: 0; }
+        .nt-chip.file .nt-chip-main i { color: #fb7185; }
+        .nt-chip-t { max-width: clamp(120px, 22vw, 280px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .nt-chip-b { color: #6b7280; padding: 5px 6px; cursor: pointer; font-size: 10px; }
+        .nt-chip-b:hover { color: #fff; }
+        .nt-chip-b.del:hover { color: #fb7185; }
+        .nt-chip.edit { padding: 4px; gap: 4px; flex-wrap: wrap; width: min(100%, 560px); }
+        .nt-in { background: #050505; border: 1px solid #262626; border-radius: 6px; padding: 5px 8px; color: #e5e5e5; font-size: 12px; outline: none; min-width: 0; flex: 1 1 160px; }
+        .nt-in:focus { border-color: #4272c4; }
+        .nt-btn { background: #4272c4; color: #fff; border-radius: 6px; padding: 5px 12px; font-weight: 600; font-size: 12px; cursor: pointer; }
+        .nt-btn:hover { background: #3b82f6; }
+        .nt-btn.ghost { background: transparent; border: 1px solid #262626; color: #9ca3af; }
+        .nt-btn.ghost:hover { color: #fff; background: rgba(255,255,255,.05); }
         .note-toolbar .nt-format button { white-space: nowrap; }
+        .note-editor a { color:#6aa0ff; text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
+        .note-editor a:hover { color:#9cc0ff; }
         .note-editor { font-size: 15.5px !important; line-height: 1.75 !important; padding: 28px clamp(16px, 4vw, 48px) !important; overflow-wrap: anywhere; }
         .note-editor h1 { font-size: 1.9rem; letter-spacing: -0.02em; }
         .note-editor h2 { font-size: 1.45rem; letter-spacing: -0.015em; }
@@ -2561,7 +2887,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         .note-editor hr { border: 0; border-top: 1px solid #3a3a3a; margin: 1rem 0; }
         .note-editor blockquote { border-left: 3px solid #4272c4; padding-left: 0.75rem; color: #9b9b9b; font-style: italic; margin: 0.5rem 0; }
         .note-editor mark { background: rgba(234, 179, 8, 0.25); color: #fef08a; padding: 0.1rem 0.3rem; border-radius: 3px; }
-        .note-editor code { font-family: 'JetBrains Mono', monospace; background: #141414; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #e2e2e2; }
+        .note-editor code { font-family: 'JetBrains Mono', monospace; background: #141414; border: 1px solid #262626; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #e2e2e2; letter-spacing: 0; }
+        .note-editor pre { font-family: 'JetBrains Mono', monospace; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; padding: 12px 14px; margin: 8px 0; font-size: 13px; line-height: 1.6; color: #e2e2e2; white-space: pre-wrap; overflow-wrap: anywhere; letter-spacing: 0; }
+        .note-editor pre code { background: transparent; border: 0; padding: 0; font-size: inherit; border-radius: 0; }
 
 
         /* ---- Painel Spotify (player proprio) + barra de aplicativos ---- */
@@ -2593,6 +2921,13 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         .sp-tabs button { flex: 1; padding: 6px; border-radius: 8px; font-size: 12px; font-weight: 700; color: #9ca3af; background: rgba(255,255,255,.04); cursor: pointer; }
         .sp-tabs button.on { background: rgba(66,114,196,.25); color: #fff; }
         .sp-aviso { margin: 8px 12px 0; padding: 7px 10px; border-radius: 8px; background: rgba(239,68,68,.1); color: #fca5a5; font-size: 11px; line-height: 1.4; flex-shrink: 0; }
+        .sp-picker { position: absolute; inset: 0; z-index: 40; background: rgba(0,0,0,.6); display: flex; align-items: flex-end; }
+        .sp-picker.hidden { display: none; }
+        .sp-pick { width: 100%; max-height: 75%; overflow-y: auto; background: #0f0f0f; border-top: 1px solid #262626; border-radius: 14px 14px 0 0; padding: 10px 10px 14px; }
+        .sp-badge { display: inline-block; font-size: 9px; font-weight: 700; color: #93b4ea; background: rgba(66,114,196,.2); border-radius: 999px; padding: 1px 6px; margin-right: 5px; }
+        .sp-r-b + .sp-r-b { margin-left: -4px; }
+        .sp-reauth { margin: 8px 12px 0; padding: 8px 10px; border-radius: 8px; background: rgba(66,114,196,.15); color: #93b4ea; font-size: 11px; line-height: 1.4; flex-shrink: 0; }
+        .sp-reauth a { color: #fff; text-decoration: underline; cursor: pointer; font-weight: 700; }
         .sp-aviso.ok { background: rgba(66,114,196,.15); color: #93b4ea; }
         .sp-aviso:empty { display: none; }
         .sp-lista { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 8px 10px; }
@@ -2678,7 +3013,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         .nx-tb-check { width:16px; height:16px; border-radius:4px; border:1px solid #52525b; display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; font-size:9px; cursor:pointer; }
         .nx-tb-check:hover { border-color:#4272c4; }
         .nx-tb-row.done .nx-tb-check { background:#059669; border-color:#059669; }
-        .nx-tb-title { flex:1; min-width:0; cursor:text; overflow-wrap:anywhere; }
+        .nx-tb-title { flex:1; min-width:0; cursor:pointer; overflow-wrap:anywhere; }
         .nx-tb-row.done .nx-tb-title { text-decoration:line-through; color:#6b7280; }
         .nx-tb-act { color:#6b7280; padding:2px 5px; border-radius:5px; cursor:pointer; font-size:11px; opacity:0; }
         .nx-tb-row:hover .nx-tb-act { opacity:1; }
@@ -2711,7 +3046,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         .nx-tb-res { display:flex; align-items:center; gap:8px; padding:5px 6px; border-radius:6px; cursor:pointer; }
         .nx-tb-res:hover { background:rgba(66,114,196,.14); }
         .nx-tb-res i { color:#4272c4; font-size:10px; }
-        #nx-sel-fab { position:fixed; z-index:9000; display:none; background:#4272c4; color:#fff; font-size:11px; font-weight:600; padding:5px 10px; border-radius:999px; box-shadow:0 6px 18px rgba(0,0,0,.5); cursor:pointer; white-space:nowrap; }
+        #nx-sel-fab { position:fixed; z-index:9000; display:none; background:#4272c4; color:#fff; font-size:11px; font-weight:600; padding:5px 10px; border-radius:999px; box-shadow:0 6px 18px rgba(0,0,0,.5); cursor:pointer; white-space:nowrap; display:none; }
+        #nx-sel-fab span[data-fab] { cursor:pointer; padding:0 2px; }
+        #nx-sel-fab span[data-fab]:hover { text-decoration:underline; }
+        #nx-sel-fab .fab-sep { display:inline-block; width:1px; height:12px; background:rgba(255,255,255,.4); margin:0 8px; vertical-align:middle; }
 
         /* ---- Motion: carregamento, entradas, feedback ---- */
         @keyframes nxIn    { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
@@ -2753,6 +3091,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         /* confirmacao (toast) */
         #nx-toasts { position:fixed; right:20px; bottom:20px; z-index:9998; display:flex; flex-direction:column; gap:8px; pointer-events:none; }
         .nx-toast { background:#141414; color:#fff; border:1px solid #262626; font-size:12px; font-weight:600; padding:10px 14px; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.6); display:flex; align-items:center; gap:8px; animation:nxToastIn .3s cubic-bezier(.2,.8,.2,1) both; }
+        .nx-wc { width:46px; display:flex; align-items:center; justify-content:center; color:#d3d3d3; background:transparent; border:0; cursor:default; }
+        .nx-wc:hover { background:rgba(255,255,255,.1); }
+        .nx-wc-close:hover { background:#e81123; color:#fff; }
         .nx-toast i { color:#34d399; }
         .nx-toast.out { animation:nxToastOut .25s ease-in both; }
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; } }
@@ -2771,7 +3112,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     </div>
 
     <!-- HEADER ESTILO NOTION -->
-    <header class="h-12 bg-[#0a0a0a] border-b border-[#262626] px-4 flex items-center justify-between z-30 select-none flex-shrink-0 w-full">
+    <header id="nx-titlebar" class="h-12 bg-[#0a0a0a] border-b border-[#262626] px-4 flex items-center justify-between z-30 select-none flex-shrink-0 w-full">
         <div class="flex items-center gap-2.5">
             <div class="w-6 h-6 flex items-center justify-center bg-transparent flex-shrink-0">
                 <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAAK+0lEQVR42u2da6xdRRXH/+vce6GWUh6JyKNAC1KNaUqBgopo1EQoIK9gDIm1mOADHzGG4BfBEHwgEI0xGI1fRHm0QvCDAiYQRRGQGgm+EPoAUcFaobRQQik9j58fzhozjnufs/d53HPO7Z7k5t59z5y9Z6//zH89ZmaNVJWRFpvERgOW0XbMjAqA4Qp+ytvcMrNW8llNUs2BaFYADF7wCoL160MkzfcquyQ9l3yuSQDCxlzwNUk1M2v49UpJZ0haLmmJpIO86g5JT0v6k6R7zOwRrz+dNVqqUoDjgZnoejlwE7CV7mWr110RfX/G9UZVCgh/2nu+gCOBLwPbIgHvAepAI/mp+2ehbAO+ChwVRpOPiKrk8XzgbuB1wCeAxyOB1oFmgRHQ9LqhPAF8EpifPqcqSc/0v88EfpkIvkX50kpGxP3A2RHI/x1pFc+3r08AbgZejQTfKNDbu42KRjQidgO3ACfutfrBBR/z/BHO1c/nUEieUJsJEN3AiilsG3ANsChpk+1NPL+f8/xfStBN3JvrbvFsTf7X6EJLMbiPu35YMKf1g3N7TDergF8llk2zBJ//GrgIONp/LnKOj+/X6kJdqX44K4wAp6XanKGb6PpE4Id99NiNwGdCj02etR/wKWBDHyPqZuCkxCS2SRX+dNSjDnPO3VqC52PO3g5cCyxO9UiwoiKdcrQ/64WSzwod4d/+rMOzOtGk8HwwK/cHPuo9tww9BIG9BtxWxGrJsKpWAD/yexTxI1Ka2wx8HFgYdaipcef5mG7eD/yihCOV9tT7gfOzPOSS7Tg3w68o0477gHPLtmPUcZtbStjzac97yrn8gH56XjISF7rFtbnHkbgbWDt28aUucZuy3Ps88PVgm0fRzEHqosOB64HnMpRwEV30wljElwrGbYr2rob3rlOGNcwzrLGVPkobPVpjo4sv9Rm3Se3vh1xX1GbD/o79EQflbOCBPvyREF+qDWrEFupFwLKScZs8e37/lK9nkTrDCF4AfLoP/yHEl5ZF72LDEH5o8MXAlhIc2kjs+esiDh1ZDCZ9tuuwa/vwH7YAFw8chET4l0cP3FOil7wGrPMpxbGKQmZYcSe5TtrdgxXXAD4/UBAi4V+SzD4V5ckHgXOSOPzYOTSJ2TrluumBEmZrPEt3SSy7QQj/VKePImHfUDbFcZtJiTRmRGzT+FIRut0OnNoXCD40a04VP456QaeeD/BP4CvAGyc51p7oh2OBLwHPJu+aVYKM7ghWXU/vHvWC44Ed/tBunI/z54H+3Xkxv05gQHEG2Nf/PsCtHQrohJbL7PieR0HEh1dGHFdkHrYF/BH4yLjzfgl9cLG/U7dOSCKrK3ryDyL6MeCuEgCkw/Nu4J1Jj6qNseDTiaPT/B1aBagnC4A7w31LNyQado8WGHZZdBTqvwx8G1g6yBjPkDl/KXADsDPjfYq+Py67haVBSAJsT0SOSdllIbFH+Tf3Iw4YJ6sosXoWApd5W7PeoWhpRjGjI/sBYHE0mdIs4A0W8QvWAxdGHDsS/ZCsR5oGLgAeLmH3d/KHmlHIZXEnAPrl45akaUlTkhqSstbnm6QZSU2v81ZJ6yStA04xs4aZNWfLMw6er5m1zKwBnCzpVkm3SXqbt7Hpbc5qD15nyt+9r4W/vQIQBP2MpKskbfLG0AGI0OCmP/cDku71+PxRZlaXNDSfIQommpnVgUXAdZLukfRBb1Mj6lB5gsfrbJZ0tctAOe/c+/DsQkExxx0MLHFFW0ZpxcN3g3ucQ/GaM7zbSyPdVsTCS42K77hzdnCOjixMQf0CsAk4LvreO9xsbRWMr2etz1k1KLM1w6w8PZm/KNu+nwGnRfc7zmUwMgA2ep0asE+k0D4cma9l4+t7gB8ELzI1EXucAVsOfD8SZtn5i9+7MxaU9j7+zoXkM3QA4mEeDfU3AF+I1gK1Ss6/bgGuBg7JEmrBeerXA1d5fKpMjL8VrRG6Ejg09pCjdxwrAGo58fU3AzcCr/Rotj7mI2pep/nixKycB3wI+HOPZuUuX8H3lqz5i37kM3QAsgTi16uAe/tYn3MX8N60p2c85z3AnX085+fAWZ0WCEwEADmBrQU9rJSLe+ZO4HvAsRnPOQb4LvBSjyNtM/CxyBLLdRAnCoCcWMthPv/6XEmzNQD1rIc1DgIO9PDBMyV0TSNZj3R9mbWgEwlAh/U5a6P7FVm/mS5fLLssph7da517wqWsrUHKZ1ZDw2aGu/81Dwc8Imm1pAskrXcPsyap3iGsEdz/hqR3SXq3/x3CInnhg7rfe1rSb/2Zq83sd8Hf8LDIrKY7GEls3uMw9Sg08FO1N2BfJukpj8PIBZvX7hDWaEbAZZVwjxm1N3NfLukMM/tJu2MybWb1UW3mHunkiO+AbzkQL5vZNyWdLulbkl5JhKyc+FJeyCIGZ5ekGySdbmbfkLTTn0nYhT+qMvLZqUBLwdY2s7+a2eckrZJ0ZyToRsHIYyuKVpqkuyWtMrPPmtmTwUcZBd2MJQAJEPVgtprZQx4xXSPp0Yhm6BKlDfT0B//uhWb2YDArnW7GJq3N2M3PmlnTFfWUpIaZrXVaukLSFu/V5AjfJP1L0hclvc/MbpVUd0Ab45g9ZWz3PvkkTTBbt5vZNcDDPnlyqFNNLaKdIPzVZnZf9N3mqHl+okZAjn4IXukGSS/mmJrmnz3hdafHhecnFoDYonH6mN9l1E5Lmu91JyJr1qRtRm4WUMLNSXqhvTdbSAVAVSoAKgCqUgFQAVABUJUKgAqAqlQATGxhmAA01XkSZB9J83LSyc/lYv7O8yTt26FeS11CI90A2Cnp1QykzW+8SNIKjzjO7BXdvS34GX/nE1wGraQDBlntkvRSLwDgyyh2qj0JkgWA1I4+XgYsMbPdk7YbsgfhhzD3bmCJ2osIwr6ILAC2mNlOX3HRKgyAo1vz3+tz2jPlyJ8s6Q7g/Gi3y5xKCxyWP/psXR04T9Idkla6DPI2dKzvWddGK4CX+6bjvDTBcfKO24eRFnjoK9E60E1GeuXbokSAjQ7plHcAy2NZ9oy8r9fvlKogKyXN4uglpicNgGSZ+2Lga0kqm0aXVAU3+gKDWr+cFxI0bemynSddNjiwZB2zCUBOso6NBZc/xrmDlvXV++Oe4L/XRCuOZzVdzWwAMMB0NXVgTSy7QfDgSBM2DROAnIRN65KEr2USNl0egTiUrFlrZjtl2ZCWy+elLNs+VinL0gZHOmHWkvYNGoAhJ+0bbm6kIaStPKdb2spBATDRaSs7WAr9Jm5tdkvc2i8AcypxawdbeWipi/vctTn3Uhd3sSKGkbx7pgcAZvjf5N2XAk+WMCvHP3l3ltccXQ86fX3Nd0J2A+CYhH7OYy6nr+/i0AziAIfbg/9A+8SlTV1yVxzhdU9kbzrAIUc/DOoIkxc9bcHJkbmYBcAGV7BXeTCsF1002UeY5PkOUa/s5xCfv0eCbWUkCtwBPN2jPT+3DvHJs7/9updjrIpmbezFH5mbx1gViDSWPcit2eXzVkkg946D3HJiMP0cZdhLqY4yLDDbVPYwz6I5PKvDPIv4D1TH2Y6NfqgOdB6x/1DkSPNmhtCrI82HGF+6KXLk6JBnaKvXHd+4TVRszIGoqb0+KeSSOEntrCrLJb1d0lFe9R+SfiPpMUn3eBqcEE1tjSoTysQDEOsHqb17PgJmqaQ3eZWNkjaGTdlp/XEuk3asSMiA8n+9OowWtVPQTMxe4Ym0f6PV2HGuCMY9LUFVxrD8B8dhzR63a2DrAAAAAElFTkSuQmCC" alt="NEXUS" class="w-full h-full object-contain">
@@ -2817,6 +3158,11 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <i class="fa-solid fa-file-import text-xs"></i> <span>Importar</span>
             </button>
             <input type="file" id="csvFileInput" accept=".json,.csv,application/json,text/csv" class="hidden" onchange="importDatabaseFromFile(event)">
+        </div>
+        <div id="nx-winctl" class="hidden items-stretch flex-shrink-0" style="height:48px;margin:0 -16px 0 12px">
+            <button type="button" onclick="nxWin('win_minimize')" class="nx-wc" title="Minimizar" aria-label="Minimizar"><svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor"/></svg></button>
+            <button type="button" onclick="nxWin('win_toggle_maximize')" class="nx-wc" id="nx-wc-max" title="Maximizar" aria-label="Maximizar"></button>
+            <button type="button" onclick="nxWin('win_close')" class="nx-wc nx-wc-close" title="Fechar" aria-label="Fechar"><svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor"/></svg></button>
         </div>
     </header>
 
@@ -3120,14 +3466,25 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                         <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
                         <button onclick="formatDoc('foreColor', '#4272c4')" class="notion-btn px-2 py-1 rounded text-sky-400 hover:text-white" title="Cor Azul"><i class="fa-solid fa-palette"></i></button>
                         <button onclick="formatDoc('hiliteColor', '#4a441e')" class="notion-btn px-2 py-1 rounded text-amber-300 hover:text-white" title="Marca-texto"><i class="fa-solid fa-highlighter"></i></button>
-                        <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
-                        <button onclick="insertTaskBlock()" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Inserir quadro de tarefas nesta página"><i class="fa-solid fa-list-check"></i></button>
-                        <button onclick="taskFromSelection()" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Criar tarefa a partir do texto selecionado"><i class="fa-regular fa-square-check"></i></button>
+                        <button onmousedown="event.preventDefault()" onclick="codeFromSelection()" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Converter seleção em código / script"><i class="fa-solid fa-code"></i></button>
+                        <button onmousedown="event.preventDefault()" onclick="abrirLinkModal()" class="notion-btn px-2 py-1 rounded text-sky-400 hover:text-white" title="Inserir / editar link (Ctrl+K)"><i class="fa-solid fa-link"></i></button>
                         <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
                         <!-- BUTTON: LIMPAR FORMATAÇÃO -->
                         <button onclick="limparFormatacao()" class="notion-btn px-2 py-1 rounded text-rose-400 hover:text-rose-300 font-medium cursor-pointer" title="Limpar Formatação">
                             <i class="fa-solid fa-eraser mr-1"></i> Limpar Formatação
                         </button>
+                    </div>
+
+                    <!-- INSERIR NA PÁGINA: Tarefas e Anexos/Links, separados da formatação do texto -->
+                    <div class="nt-insert flex items-center gap-1 bg-white/5 border border-white/5 p-1 rounded text-xs">
+                        <span class="nt-ins-label">Tarefas</span>
+                        <button onclick="insertTaskBlock()" class="notion-btn nt-ib" title="Inserir quadro de tarefas nesta página"><i class="fa-solid fa-list-check"></i><span class="lbl">Quadro</span></button>
+                        <button onclick="taskFromSelection()" class="notion-btn nt-ib" title="Criar tarefa a partir do texto selecionado"><i class="fa-regular fa-square-check"></i><span class="lbl">Da seleção</span></button>
+                        <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
+                        <span class="nt-ins-label">Anexos</span>
+                        <button onclick="ntResNovoLink()" class="notion-btn nt-ib" title="Adicionar um link a esta página"><i class="fa-solid fa-link"></i><span class="lbl">Link</span></button>
+                        <button onclick="ntResNovoArquivo()" class="notion-btn nt-ib" title="Anexar um arquivo do computador a esta página"><i class="fa-solid fa-paperclip"></i><span class="lbl">Arquivo</span></button>
+                        <button id="nt-res-toggle" onclick="ntResToggle()" class="notion-btn nt-ib" title="Mostrar ou ocultar os anexos e links desta página"><i class="fa-solid fa-folder-open"></i><span class="lbl">Ver</span><b id="nt-res-count" class="nt-cnt">0</b></button>
                     </div>
 
                     <div class="nt-actions flex items-center gap-1.5">
@@ -3141,6 +3498,25 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                             <i class="fa-regular fa-trash-can"></i>
                         </button>
                     </div>
+                </div>
+
+                <!-- ANEXOS E LINKS DA PÁGINA (da nota que esta em foco) -->
+                <div id="nt-res" class="nt-res hidden">
+                    <div class="nt-res-head">
+                        <i class="fa-solid fa-paperclip"></i><span>Anexos e links desta página</span><b id="nt-res-n"></b>
+                        <span class="nt-res-btns">
+                            <button type="button" onclick="ntResNovoLink()">+ Link</button>
+                            <button type="button" onclick="ntResNovoArquivo()">+ Arquivo</button>
+                            <button type="button" onclick="ntResToggle()" title="Ocultar"><i class="fa-solid fa-chevron-up"></i></button>
+                        </span>
+                    </div>
+                    <div id="nt-res-form" class="nt-res-form hidden">
+                        <input id="nt-res-url" class="nt-in" placeholder="Endereço do link (https://...)" maxlength="2000" onkeydown="if (event.key === 'Enter') ntResAdicionarLink(); else if (event.key === 'Escape') ntResFecharForm()">
+                        <input id="nt-res-label" class="nt-in" placeholder="Nome / capa do link (opcional)" maxlength="80" onkeydown="if (event.key === 'Enter') ntResAdicionarLink(); else if (event.key === 'Escape') ntResFecharForm()">
+                        <button type="button" class="nt-btn" onclick="ntResAdicionarLink()">Adicionar</button>
+                        <button type="button" class="nt-btn ghost" onclick="ntResFecharForm()">Cancelar</button>
+                    </div>
+                    <div id="nt-res-body" class="nt-res-body" onclick="ntResClique(event)" onkeydown="ntResTecla(event)"></div>
                 </div>
 
                 <div id="editor-panes" class="flex-1 flex min-h-0 overflow-hidden bg-black"></div>
@@ -3164,6 +3540,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 </span>
             </div>
             <div id="sp-body" class="sp-body"><div class="sp-card">Carregando...</div></div>
+            <div id="sp-picker" class="sp-picker hidden" onclick="if (event.target === this) spFecharPicker()"></div>
             <div id="sp-now" class="sp-now hidden">
                 <div class="sp-np">
                     <img id="sp-np-img" class="sp-cover" alt="" referrerpolicy="no-referrer">
@@ -3172,6 +3549,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                         <div id="sp-np-art" class="sp-r-s"></div>
                     </div>
                     <div class="sp-ctrl">
+                        <button type="button" onclick="spAdicionarAtual()" title="Adicionar esta música a uma playlist"><i class="fa-solid fa-plus"></i></button>
                         <button type="button" id="sp-shuf" onclick="spShuffle()" title="Modo aleatório"><i class="fa-solid fa-shuffle"></i></button>
                         <button type="button" onclick="spCmd('prev')" title="Anterior"><i class="fa-solid fa-backward-step"></i></button>
                         <button type="button" id="sp-pp" class="sp-pp" onclick="spCmd('toggle')" title="Tocar/Pausar"><i class="fa-solid fa-play"></i></button>
@@ -3474,6 +3852,33 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     </div>
 
     <!-- ================= CENTRAL DE NOTIFICAÇÕES E PRAZOS ================= -->
+    <div id="linkModal" class="fixed inset-0 bg-black/60 z-[70] hidden items-center justify-center p-4" onclick="if(event.target===this)fecharLinkModal()">
+        <div class="bg-[#0a0a0a] border border-[#262626] rounded-lg w-full max-w-sm shadow-2xl">
+            <div class="px-4 py-3 border-b border-[#262626] bg-[#1e1e1e] text-sm font-bold text-white"><i class="fa-solid fa-link mr-2 text-sky-400"></i>Link</div>
+            <div class="p-4 space-y-2">
+                <input id="linkUrlInput" type="text" placeholder="https://..." class="w-full bg-[#050505] border border-[#262626] rounded px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-[#4272c4]">
+                <div class="text-[10px] text-gray-500">Selecione um texto antes para transformá-lo em link. Deixe vazio para remover o link.</div>
+            </div>
+            <div class="px-4 py-2.5 border-t border-[#262626] flex justify-end gap-2">
+                <button onclick="fecharLinkModal()" class="text-xs text-gray-400 hover:text-white px-2.5 py-1 cursor-pointer">Cancelar</button>
+                <button onclick="confirmarLink()" class="text-xs text-white px-3 py-1 rounded bg-[#4272c4] hover:bg-[#5282d4] cursor-pointer">Aplicar</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="taskPeekModal" class="fixed inset-0 bg-black/60 z-[70] hidden items-center justify-center p-4" onclick="if(event.target===this)closeTaskPeek()">
+        <div class="bg-[#0a0a0a] border border-[#262626] rounded-lg w-full max-w-sm max-h-[80vh] flex flex-col overflow-hidden shadow-2xl">
+            <div class="px-4 py-3 border-b border-[#262626] bg-[#1e1e1e] flex items-start justify-between gap-3">
+                <div id="taskPeekTitle" class="text-sm font-bold text-white break-words min-w-0"></div>
+                <button onclick="closeTaskPeek()" class="text-gray-400 hover:text-white cursor-pointer flex-shrink-0" title="Fechar"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div id="taskPeekBody" class="p-4 overflow-y-auto space-y-3 text-xs text-gray-300"></div>
+            <div class="px-4 py-2.5 border-t border-[#262626] flex justify-end">
+                <button id="taskPeekOpen" class="text-xs text-sky-400 hover:text-white px-2.5 py-1 rounded bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/20 cursor-pointer"><i class="fa-solid fa-arrow-up-right-from-square mr-1"></i>Abrir tarefa completa</button>
+            </div>
+        </div>
+    </div>
+
     <div id="notifModal" class="fixed inset-0 bg-black/70 z-[60] hidden items-center justify-center p-4">
         <div class="bg-[#0a0a0a] border border-[#262626] rounded w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
             <div class="p-4 border-b border-[#262626] flex items-center justify-between bg-[#1e1e1e]">
@@ -3699,7 +4104,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 const done = (Number(t.progress) || 0) >= 100;
                 return `<div class="nx-tb-row ${done ? 'done' : ''}" data-id="${escapeHtml(t.id)}">
                     <span class="nx-tb-check" data-nx-act="toggle" title="Concluir / reabrir">${done ? '<i class="fa-solid fa-check"></i>' : ''}</span>
-                    <span class="nx-tb-title" data-nx-act="edit" title="Clique para editar">${escapeHtml(t.title || '')}</span>
+                    <span class="nx-tb-title" data-nx-act="view" title="Clique para visualizar">${escapeHtml(t.title || '')}</span>
                     ${_chipProjeto(t)}
                     <span class="nx-tb-act" data-nx-act="edit" title="Editar"><i class="fa-solid fa-pencil"></i></span>
                     <span class="nx-tb-act" data-nx-act="unlink" title="Remover da página (a tarefa continua na aba Tarefas)"><i class="fa-solid fa-link-slash"></i></span>
@@ -3764,6 +4169,37 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             return texto ? { ed, texto } : null;
         }
 
+        /* Converte o trecho selecionado em codigo: uma linha vira <code> inline,
+           varias linhas viram bloco <pre><code>. Sem cores de sintaxe, so a fonte mono. */
+        function codeFromSelection() {
+            const sel = window.getSelection();
+            const no0 = sel && sel.anchorNode && (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement);
+            const ed = no0 && no0.closest && no0.closest('.note-editor');
+            if (!ed || no0.closest('.nx-taskblock')) { showToast('Selecione um trecho de texto na nota primeiro.'); return; }
+            const jaCodigo = no0.closest('pre, code');
+            if (jaCodigo && ed.contains(jaCodigo)) {                       // alterna: volta a texto comum
+                const bloco = jaCodigo.closest('pre') || jaCodigo;
+                const p = document.createElement(bloco.tagName === 'PRE' ? 'p' : 'span');
+                p.textContent = bloco.textContent;
+                bloco.replaceWith(p);
+                onPaneInput(Number(ed.dataset.pane));
+                return;
+            }
+            if (sel.isCollapsed) { showToast('Selecione um trecho de texto na nota primeiro.'); return; }
+            const texto = sel.toString().replace(/\u00a0/g, ' ');
+            if (!texto.trim()) return;
+            const rg = sel.getRangeAt(0);
+            const prox = rg.endContainer.nodeType === 3 ? rg.endContainer.nodeValue.charAt(rg.endOffset) : '';
+            const sufixo = /[\s\u00a0]/.test(prox) ? '' : '&nbsp;';
+            ed.focus();
+            const html = /\n/.test(texto.replace(/\n+$/, ''))
+                ? `<pre><code>${escapeHtml(texto.replace(/\n+$/, ''))}</code></pre><p><br></p>`
+                : `<code>${escapeHtml(texto.trim())}</code>${sufixo}`;
+            document.execCommand('insertHTML', false, html);
+            const fab = document.getElementById('nx-sel-fab'); if (fab) fab.style.display = 'none';
+            onPaneInput(Number(ed.dataset.pane));
+        }
+
         function taskFromSelection() {
             const r = _textoSelecionadoNoEditor();
             if (!r) { showToast('Selecione um trecho de texto na nota primeiro.'); return; }
@@ -3775,6 +4211,143 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             _garantirQuadro(r.ed);
             const fab = document.getElementById('nx-sel-fab'); if (fab) fab.style.display = 'none';
             showToast('Tarefa criada a partir do texto.');
+        }
+
+        /* ---------------- Anexos e links de cada pagina do Vault ----------------
+           note.resources = [{ id, type: 'link' | 'file', url, name, label }]
+           label e a "capa": o nome curto exibido no lugar da URL/arquivo. */
+        let ntResAberto = true, ntResEditId = null;
+        try { ntResAberto = localStorage.getItem('nx-res-open') !== '0'; } catch (e) { }
+        const _ntEl = id => document.getElementById(id);
+
+        function ntResNota() { return (selectedNoteId && state.notepad.find(n => n.id === selectedNoteId)) || null; }
+        function ntResLista(n) { if (!Array.isArray(n.resources)) n.resources = []; return n.resources; }
+        function ntResHost(u) { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return u; } }
+        function ntResTitulo(r) { return (r.label && r.label.trim()) || (r.type === 'file' ? (r.name || r.url) : ntResHost(r.url)); }
+        function ntResUrlOk(bruto) {
+            let u = String(bruto || '').trim();
+            if (!u) return null;
+            if (!/^[a-z][a-z0-9+.-]*:/i.test(u)) u = 'https://' + u;
+            try { const x = new URL(u); return (x.protocol === 'http:' || x.protocol === 'https:') ? x.href : null; } catch (e) { return null; }
+        }
+        function ntResSalvar() { saveState(true, true); ntResRender(); }
+
+        function ntResRender() {
+            const box = _ntEl('nt-res'); if (!box) return;
+            const n = ntResNota();
+            const lista = n && Array.isArray(n.resources) ? n.resources : [];
+            const cnt = _ntEl('nt-res-count'); if (cnt) cnt.textContent = lista.length;
+            const tg = _ntEl('nt-res-toggle'); if (tg) tg.style.opacity = n ? '1' : '.45';
+            if (!n || !ntResAberto) { box.classList.add('hidden'); return; }
+            box.classList.remove('hidden');
+            _ntEl('nt-res-n').textContent = lista.length ? '(' + lista.length + ')' : '';
+            const corpo = _ntEl('nt-res-body');
+            if (corpo.querySelector('.nt-in') && ntResEditId && lista.some(r => r.id === ntResEditId)) return;   // nao atropela uma edicao em curso
+            if (ntResEditId && !lista.some(r => r.id === ntResEditId)) ntResEditId = null;
+            corpo.innerHTML = lista.length ? lista.map(r => {
+                const ehArq = r.type === 'file';
+                if (r.id === ntResEditId) {
+                    return `<div class="nt-chip edit ${ehArq ? 'file' : ''}" data-id="${escapeHtml(r.id)}">
+                        <input class="nt-in" data-campo="label" maxlength="80" placeholder="Nome / capa" value="${escapeHtml(r.label || '')}">
+                        ${ehArq ? '' : `<input class="nt-in" data-campo="url" maxlength="2000" placeholder="https://..." value="${escapeHtml(r.url)}">`}
+                        <button type="button" class="nt-btn" data-act="salvar">Salvar</button>
+                        <button type="button" class="nt-btn ghost" data-act="cancelar">Cancelar</button>
+                    </div>`;
+                }
+                const dica = ehArq ? r.url : r.url;
+                return `<div class="nt-chip ${ehArq ? 'file' : ''}" data-id="${escapeHtml(r.id)}">
+                    <span class="nt-chip-main" data-act="abrir" title="${escapeHtml(dica)}"><i class="${ehArq ? 'fa-solid fa-file' : 'fa-solid fa-link'}"></i><span class="nt-chip-t">${escapeHtml(ntResTitulo(r))}</span></span>
+                    <span class="nt-chip-b" data-act="editar" title="Editar nome${ehArq ? '' : ' e endereço'}"><i class="fa-solid fa-pencil"></i></span>
+                    <span class="nt-chip-b del" data-act="remover" title="Remover"><i class="fa-solid fa-xmark"></i></span>
+                </div>`;
+            }).join('') : '<div class="nt-res-empty">Nenhum anexo ou link nesta página. Use + Link ou + Arquivo.</div>';
+            if (ntResEditId) { const i = corpo.querySelector('.nt-in'); if (i) { i.focus(); i.select(); } }
+        }
+
+        function ntResAbrirPainel() {
+            ntResAberto = true;
+            try { localStorage.setItem('nx-res-open', '1'); } catch (e) { }
+            ntResRender();
+        }
+        function ntResToggle() {
+            if (!ntResNota()) { showToast('Abra uma nota do Vault primeiro.'); return; }
+            ntResAberto = !ntResAberto;
+            try { localStorage.setItem('nx-res-open', ntResAberto ? '1' : '0'); } catch (e) { }
+            ntResRender();
+        }
+        function ntResNovoLink() {
+            if (!ntResNota()) { showToast('Abra uma nota do Vault primeiro.'); return; }
+            ntResAbrirPainel();
+            _ntEl('nt-res-form').classList.remove('hidden');
+            const u = _ntEl('nt-res-url'); if (u) u.focus();
+        }
+        function ntResFecharForm() {
+            _ntEl('nt-res-form').classList.add('hidden');
+            _ntEl('nt-res-url').value = ''; _ntEl('nt-res-label').value = '';
+        }
+        function ntResAdicionarLink() {
+            const n = ntResNota(); if (!n) return;
+            const url = ntResUrlOk(_ntEl('nt-res-url').value);
+            if (!url) { showToast('Endereço inválido. Use um link http ou https.'); _ntEl('nt-res-url').focus(); return; }
+            ntResLista(n).push({ id: 'res-' + Date.now() + '-' + Math.floor(Math.random() * 1000), type: 'link', url, label: _ntEl('nt-res-label').value.trim().slice(0, 80) });
+            ntResFecharForm();
+            ntResSalvar();
+        }
+        function ntResNovoArquivo() {
+            const n = ntResNota();
+            if (!n) { showToast('Abra uma nota do Vault primeiro.'); return; }
+            const api = window.pywebview && window.pywebview.api;
+            if (!api || !api.pick_file_native) { showToast('Anexar arquivos só funciona no aplicativo desktop.'); return; }
+            ntResAbrirPainel();
+            api.pick_file_native().then(r => {
+                if (!r || r.status !== 'success') return;
+                const alvo = state.notepad.find(x => x.id === n.id);
+                if (!alvo) return;
+                ntResLista(alvo).push({ id: 'res-' + Date.now() + '-' + Math.floor(Math.random() * 1000), type: 'file', url: r.path, name: r.name, label: '' });
+                ntResSalvar();
+            });
+        }
+        function ntResAbrir(r) {
+            const api = window.pywebview && window.pywebview.api;
+            if (!api || !api.open_external_target) return;
+            api.open_external_target(r.url).then(res => { if (res && res.status === 'error') showToast(res.message || 'Não foi possível abrir.'); });
+        }
+        function ntResSalvarEdicao(corpo, id) {
+            const n = ntResNota(); if (!n) return;
+            const r = ntResLista(n).find(x => x.id === id); if (!r) return;
+            const lab = corpo.querySelector('[data-campo="label"]');
+            const url = corpo.querySelector('[data-campo="url"]');
+            if (url) {
+                const ok = ntResUrlOk(url.value);
+                if (!ok) { showToast('Endereço inválido. Use um link http ou https.'); url.focus(); return; }
+                r.url = ok;
+            }
+            r.label = lab ? lab.value.trim().slice(0, 80) : '';
+            ntResEditId = null;
+            ntResSalvar();
+        }
+        function ntResClique(e) {
+            const alvo = e.target.closest && e.target.closest('[data-act]');
+            const chip = alvo && alvo.closest('.nt-chip');
+            if (!alvo || !chip) return;
+            const n = ntResNota(); if (!n) return;
+            const id = chip.dataset.id;
+            const r = ntResLista(n).find(x => x.id === id); if (!r) return;
+            const act = alvo.dataset.act;
+            if (act === 'abrir') ntResAbrir(r);
+            else if (act === 'editar') { ntResEditId = id; _ntEl('nt-res-body').innerHTML = ''; ntResRender(); }
+            else if (act === 'cancelar') { ntResEditId = null; ntResRender(); }
+            else if (act === 'salvar') ntResSalvarEdicao(_ntEl('nt-res-body'), id);
+            else if (act === 'remover') {
+                if (!confirm('Remover este ' + (r.type === 'file' ? 'arquivo' : 'link') + ' da página? (o arquivo original não é apagado)')) return;
+                n.resources = ntResLista(n).filter(x => x.id !== id);
+                ntResSalvar();
+            }
+        }
+        function ntResTecla(e) {
+            if (!ntResEditId) return;
+            if (e.key === 'Enter') { e.preventDefault(); ntResSalvarEdicao(_ntEl('nt-res-body'), ntResEditId); }
+            else if (e.key === 'Escape') { ntResEditId = null; ntResRender(); }
         }
 
         function abrirNotaDaTarefa(noteId) {
@@ -3792,6 +4365,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             const id = row && row.dataset.id;
             if (act === 'toggle' && id) toggleTaskCompletion(id);
             else if (act === 'add') _adicionarDoQuadro(b);
+            else if (act === 'view' && id) openTaskPeek(id);
             else if (act === 'del' && id) {
                 if (!confirm('Excluir esta tarefa? Ela também sai da aba Tarefas.')) return;
                 state.tasks = state.tasks.filter(t => t.id !== id);
@@ -3813,6 +4387,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             }
             else if (act === 'link') {
                 const t = state.tasks.find(x => x.id === alvo.dataset.id);
+                if (t && (Number(t.progress) || 0) >= 100) { showToast('Tarefa já concluída não pode ser vinculada.'); return; }
                 if (t) { t.noteId = b.dataset.note; saveState(true, true); renderAll(); showToast('Tarefa vinculada a esta página.'); }
             }
         });
@@ -3844,8 +4419,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             const alvo = b.querySelector('.nx-tb-results');
             if (!alvo) return;
             const lista = state.tasks
-                .filter(t => t.noteId !== b.dataset.note && (!q || _norm(t.title).includes(q)))
-                .sort((x, y) => ((Number(x.progress) || 0) >= 100) - ((Number(y.progress) || 0) >= 100))
+                .filter(t => t.noteId !== b.dataset.note && (Number(t.progress) || 0) < 100 && (!q || _norm(t.title).includes(q)))
                 .slice(0, 8);
             alvo.innerHTML = lista.length ? lista.map(t => {
                 const pj = t.projectId && state.projects.find(p => p.id === t.projectId);
@@ -3855,7 +4429,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     ${pj ? `<span class="nx-tb-proj">${escapeHtml(pj.name)}</span>` : ''}
                     ${outra ? `<span class="nx-tb-proj vazio" style="opacity:1" title="Hoje está na página: ${escapeHtml(outra.title || '')}">em outra página</span>` : ''}
                 </div>`;
-            }).join('') : '<div class="nx-tb-empty">Nenhuma tarefa encontrada.</div>';
+            }).join('') : '<div class="nx-tb-empty">Nenhuma tarefa em andamento encontrada.</div>';
         }
         document.addEventListener('input', e => {
             if (e.target.classList && e.target.classList.contains('nx-tb-search-input')) _resultadosBusca(e.target.closest('.nx-taskblock'));
@@ -3949,9 +4523,13 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         (function () {
             const fab = document.createElement('div');
             fab.id = 'nx-sel-fab';
-            fab.innerHTML = '<i class="fa-regular fa-square-check" style="margin-right:6px"></i>Criar tarefa';
+            fab.innerHTML = '<span data-fab="task"><i class="fa-regular fa-square-check" style="margin-right:6px"></i>Criar tarefa</span><span class="fab-sep"></span><span data-fab="code"><i class="fa-solid fa-code" style="margin-right:6px"></i>Código</span>';
             fab.addEventListener('mousedown', e => e.preventDefault());      // mantem a selecao
-            fab.addEventListener('click', () => taskFromSelection());
+            fab.addEventListener('click', e => {
+                const a = e.target.closest('[data-fab]');
+                if (!a) return;
+                if (a.dataset.fab === 'code') codeFromSelection(); else taskFromSelection();
+            });
             document.body.appendChild(fab);
             let raf = 0;
             document.addEventListener('selectionchange', () => {
@@ -4093,7 +4671,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             spPollConn = setInterval(async () => {
                 n++;
                 const i = await spApi().spotify_info();
-                if (i && i.connected) { clearInterval(spPollConn); spPollConn = null; spCarregar(); }
+                if (i && i.connected && !i.reauth) { clearInterval(spPollConn); spPollConn = null; spCarregar(); }
                 else if (n > 160) { clearInterval(spPollConn); spPollConn = null; spRenderConectar('Tempo esgotado. Tente conectar de novo.'); }
             }, 1500);
         }
@@ -4116,7 +4694,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <div class="sp-tabs">
                     <button type="button" id="sp-tab-playlists" onclick="spAba('playlists')">Playlists</button>
                     <button type="button" id="sp-tab-buscar" onclick="spAba('buscar')">Buscar</button>
+                    <button type="button" id="sp-tab-fila" onclick="spAba('fila')">Fila</button>
                 </div>
+                ${spInfo && spInfo.reauth ? '<div class="sp-reauth">Para adicionar músicas a playlists, reautorize a conta. <a onclick="spConectar()">Reautorizar</a></div>' : ''}
                 <div id="sp-aviso" class="sp-aviso"></div>
                 <div id="sp-lista" class="sp-lista"></div>`;
             spAba(spTab);
@@ -4124,18 +4704,20 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         function spAviso(msg, ok) { const el = document.getElementById('sp-aviso'); if (!el) return; el.textContent = msg || ''; el.classList.toggle('ok', !!ok); }
         function spAba(t) {
             spTab = t;
-            ['playlists', 'buscar'].forEach(k => { const b = document.getElementById('sp-tab-' + k); if (b) b.classList.toggle('on', k === t); });
+            ['playlists', 'buscar', 'fila'].forEach(k => { const b = document.getElementById('sp-tab-' + k); if (b) b.classList.toggle('on', k === t); });
             if (t === 'playlists') { spPlAtual = null; spListarPlaylists(); }
+            else if (t === 'fila') spRenderFila();
             else spRenderBusca();
         }
 
         function spLinha(o) {
-            // o: {act, uri, ctx, id, name, img, titulo, sub, play, atual}
-            const d = ['act', 'uri', 'ctx', 'id', 'name'].map(k => o[k] ? ` data-${k}="${escapeHtml(o[k])}"` : '').join('');
+            // o: {act, uri, ctx, id, name, i, img, titulo, sub, badge, play, add, atual}
+            const d = ['act', 'uri', 'ctx', 'id', 'name', 'i'].map(k => o[k] ? ` data-${k}="${escapeHtml(o[k])}"` : '').join('');
             const img = spImg(o.img);
             return `<div class="sp-row ${o.atual ? 'tocando' : ''}"${d} onclick="spClick(this)">
                 ${img ? `<img class="sp-cover" src="${escapeHtml(img)}" alt="" referrerpolicy="no-referrer">` : '<div class="sp-cover"></div>'}
-                <div class="sp-r-t"><div class="sp-r-n">${escapeHtml(o.titulo || '')}</div><div class="sp-r-s">${escapeHtml(o.sub || '')}</div></div>
+                <div class="sp-r-t"><div class="sp-r-n">${escapeHtml(o.titulo || '')}</div><div class="sp-r-s">${o.badge ? `<span class="sp-badge">${escapeHtml(o.badge)}</span>` : ''}${escapeHtml(o.sub || '')}</div></div>
+                ${o.add ? `<button type="button" class="sp-r-b" title="Adicionar a uma playlist" data-act="add" data-uri="${escapeHtml(o.add.uri)}" onclick="event.stopPropagation(); spClick(this)"><i class="fa-solid fa-plus"></i></button>` : ''}
                 ${o.play ? `<button type="button" class="sp-r-b" title="Tocar" data-act="${escapeHtml(o.play.act)}" data-uri="${escapeHtml(o.play.uri)}" onclick="event.stopPropagation(); spClick(this)"><i class="fa-solid fa-play"></i></button>` : ''}
             </div>`;
         }
@@ -4145,6 +4727,13 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             else if (d.act === 'play-track' && spUriOk(d.uri)) spTocar({ uris: [d.uri] });
             else if (d.act === 'play-in' && spUriOk(d.uri) && spUriOk(d.ctx)) spTocar({ context_uri: d.ctx, offset: { uri: d.uri } });
             else if (d.act === 'open-pl' && spIdOk(d.id) && spUriOk(d.uri)) spAbrirPlaylist(d.id, d.name || 'Playlist', d.uri, 0);
+            else if (d.act === 'add') spAbrirPicker(d.uri);
+            else if (d.act === 'pick') spAdicionar(d.id, d.name || 'playlist');
+            else if (d.act === 'nova') spNovaPlaylist();
+            else if (d.act === 'fila-play' && spFilaPlanejada) {
+                const i = Number(d.i);
+                if (i >= 0 && i < spFilaPlanejada.length) spTocar({ uris: spFilaPlanejada.slice(i).map(t => t.uri) }, true);
+            }
         }
 
         async function spListarPlaylists() {
@@ -4154,6 +4743,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             const r = await spChamar('GET', '/v1/me/playlists?limit=50');
             if (!spOk(r)) { el.innerHTML = `<div class="sp-err" style="margin:8px">${escapeHtml(spMsgErro(r))}</div>`; return; }
             const itens = ((r.data && r.data.items) || []).filter(p => p && spIdOk(p.id) && spUriOk(p.uri));
+            spPls = itens; spPlsT = Date.now();
             if (!itens.length) { el.innerHTML = '<div class="sp-note" style="padding:8px">Nenhuma playlist na sua biblioteca.</div>'; return; }
             el.innerHTML = itens.map(p => {
                 const total = (p.items && p.items.total != null) ? p.items.total : (p.tracks && p.tracks.total);
@@ -4184,7 +4774,8 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 act: 'play-in', uri: t.uri, ctx: uri, titulo: t.name,
                 sub: (t.artists || []).map(a => a.name).join(', '),
                 img: t.album && t.album.images && t.album.images[t.album.images.length > 1 ? 1 : 0] && t.album.images[t.album.images.length > 1 ? 1 : 0].url,
-                atual: spState && spState.track && spState.track.uri === t.uri
+                atual: spState && spState.track && spState.track.uri === t.uri,
+                add: { uri: t.uri }
             })).join('');
             if (!offset) box.innerHTML = html || '<div class="sp-note" style="padding:8px">Playlist vazia.</div>';
             else { const mais = document.getElementById('sp-mais'); if (mais) mais.remove(); box.insertAdjacentHTML('beforeend', html); }
@@ -4212,7 +4803,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             const albums = ((d.albums && d.albums.items) || []).filter(a => a && spUriOk(a.uri));
             const lists = ((d.playlists && d.playlists.items) || []).filter(p => p && spUriOk(p.uri));
             let h = '';
-            if (tracks.length) h += '<div class="sp-sec">Músicas</div>' + tracks.map(t => spLinha({ act: 'play-track', uri: t.uri, titulo: t.name, sub: (t.artists || []).map(a => a.name).join(', '), img: img(t.album), atual: spState && spState.track && spState.track.uri === t.uri })).join('');
+            if (tracks.length) h += '<div class="sp-sec">Músicas</div>' + tracks.map(t => spLinha({ act: 'play-track', uri: t.uri, add: { uri: t.uri }, titulo: t.name, sub: (t.artists || []).map(a => a.name).join(', '), img: img(t.album), atual: spState && spState.track && spState.track.uri === t.uri })).join('');
             if (albums.length) h += '<div class="sp-sec">Álbuns</div>' + albums.map(a => spLinha({ act: 'play-ctx', uri: a.uri, titulo: a.name, sub: (a.artists || []).map(x => x.name).join(', '), img: img(a) })).join('');
             if (lists.length) h += '<div class="sp-sec">Playlists</div>' + lists.map(p => spLinha({ act: 'play-ctx', uri: p.uri, titulo: p.name, sub: (p.owner && p.owner.display_name) || '', img: img(p) })).join('');
             box.innerHTML = h || '<div class="sp-note" style="padding:8px">Nada encontrado.</div>';
@@ -4258,7 +4849,8 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     : (m.msg || 'Erro no player do Spotify.'));
             }
         }
-        async function spTocar(corpo) {
+        async function spTocar(corpo, manterFila) {
+            if (!manterFila) spFilaPlanejada = null;     // tocou outra coisa: a fila do Smart Shuffle nao vale mais
             if (!spDevice) { spAviso('O player do NEXUS ainda está iniciando. Tente de novo em instantes.'); spIniciarPlayer(); return; }
             spAviso('');
             spCmd('activate');
@@ -4292,8 +4884,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         /* ---- Smart Shuffle (aproximado) ----
            O Smart Shuffle oficial do Spotify nao existe na API. Esta versao: (1) embaralha a
            playlist sem repetir o mesmo artista em sequencia e (2) intercala musicas NOVAS
-           (fora da playlist) de artistas que voce ja tem nela. Toca ate 100 faixas por vez. */
+           (fora da playlist) de artistas que voce ja tem nela. Toca ate 100 faixas por vez e
+           guarda a ordem montada em spFilaPlanejada, mostrada na aba Fila. */
         const SP_SMART_MAX = 100;
+        let spFilaPlanejada = null, spFilaInicio = 0, spUltimaFila = '', spFilaT = 0;
         function spEmbaralhar(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
         function spEspacarArtistas(faixas) {
             const resto = faixas.slice(), saida = [];
@@ -4305,6 +4899,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             }
             return saida;
         }
+        const spCapa = o => { const im = o && o.images; return im && im[im.length > 1 ? 1 : 0] ? im[im.length > 1 ? 1 : 0].url : ''; };
         let spSmartOcupado = false;
         async function spSmartShuffle(id, nome, uri) {
             if (spSmartOcupado) return;
@@ -4320,7 +4915,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                         const t = it && (it.item || it.track);
                         if (t && typeof t === 'object' && String(t.uri).startsWith('spotify:track:') && spUriOk(t.uri)) {
                             const ids = (t.artists || []).map(a => a && a.id).filter(spIdOk);
-                            todas.push({ uri: t.uri, artist: ids[0] || t.uri, ids });
+                            todas.push({ uri: t.uri, artist: ids[0] || t.uri, ids, name: t.name, sub: (t.artists || []).map(a => a.name).join(', '), img: spCapa(t.album), nova: false });
                         }
                     });
                     if (!(r.data && r.data.next)) break;
@@ -4342,26 +4937,128 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     const alb = albs[Math.floor(Math.random() * albs.length)];
                     const rt = await spChamar('GET', `/v1/albums/${alb.id}/tracks?limit=20`);
                     if (!spOk(rt)) continue;
-                    const cand = ((rt.data && rt.data.items) || []).filter(t => t && String(t.uri).startsWith('spotify:track:') && spUriOk(t.uri) && !conhecidas.has(t.uri) && !novas.includes(t.uri));
-                    if (cand.length) novas.push(cand[Math.floor(Math.random() * cand.length)].uri);
+                    const cand = ((rt.data && rt.data.items) || []).filter(t => t && String(t.uri).startsWith('spotify:track:') && spUriOk(t.uri) && !conhecidas.has(t.uri) && !novas.some(n => n.uri === t.uri));
+                    if (cand.length) {
+                        const t = cand[Math.floor(Math.random() * cand.length)];
+                        novas.push({ uri: t.uri, name: t.name, sub: (t.artists || []).map(a => a.name).join(', '), img: spCapa(alb), nova: true });
+                    }
                 }
 
                 // intercala: 1 descoberta a cada ~4 faixas (a primeira so a partir da 4a)
-                const fila = base.slice(0, Math.max(1, SP_SMART_MAX - novas.length)).map(t => t.uri);
-                novas.forEach((u, i) => fila.splice(Math.min(fila.length, 3 + i * 5), 0, u));
+                const fila = base.slice(0, Math.max(1, SP_SMART_MAX - novas.length));
+                novas.forEach((n, i) => fila.splice(Math.min(fila.length, 3 + i * 5), 0, n));
 
                 // desliga o shuffle do Spotify: a ordem montada aqui e que vale
                 spShufflePref = false; spShuffleBotao();
                 await spChamar('PUT', '/v1/me/player/shuffle?state=false&device_id=' + encodeURIComponent(spDevice));
                 spCmd('activate');
-                const rp = await spChamar('PUT', '/v1/me/player/play?device_id=' + encodeURIComponent(spDevice), { uris: fila });
-                if (spOk(rp)) spAviso(`Smart Shuffle: ${fila.length - novas.length} músicas da playlist + ${novas.length} descobertas.`, true);
-                else spAviso(spMsgErro(rp));
+                const rp = await spChamar('PUT', '/v1/me/player/play?device_id=' + encodeURIComponent(spDevice), { uris: fila.map(t => t.uri) });
+                if (spOk(rp)) {
+                    spFilaPlanejada = fila; spFilaInicio = Date.now(); spUltimaFila = '';
+                    spAviso(`Smart Shuffle: ${fila.length - novas.length} músicas da playlist + ${novas.length} descobertas.`, true);
+                    spAba('fila');
+                } else spAviso(spMsgErro(rp));
             } finally { spSmartOcupado = false; }
+        }
+
+        /* ---- Fila de reproducao ---- */
+        async function spRenderFila() {
+            const el = document.getElementById('sp-lista');
+            if (!el || spTab !== 'fila') return;
+            const atual = spState && spState.track ? spState.track.uri : '';
+            const cab = '<div class="sp-voltar"><span>Fila de reprodução</span><button type="button" onclick="spRenderFila()" title="Atualizar"><i class="fa-solid fa-rotate-right"></i></button></div>';
+            let idx = -1;
+            if (spFilaPlanejada) {
+                idx = spFilaPlanejada.findIndex(t => t.uri === atual);
+                if (idx < 0 && Date.now() - spFilaInicio < 8000) idx = 0;      // o player ainda nao informou a faixa
+            }
+            if (idx >= 0) {
+                const f = spFilaPlanejada;
+                const linha = (t, i, tocando) => spLinha({
+                    act: tocando ? '' : 'fila-play', i: String(i), titulo: t.name, sub: t.sub, img: t.img, atual: tocando,
+                    badge: t.nova ? 'Descoberta' : '', add: spUriOk(t.uri) ? { uri: t.uri } : null
+                });
+                const depois = f.slice(idx + 1);
+                el.innerHTML = cab +
+                    '<div class="sp-sec">Tocando agora</div>' + linha(f[idx], idx, true) +
+                    `<div class="sp-sec">A seguir · Smart Shuffle (${depois.length})</div>` +
+                    (depois.map((t, k) => linha(t, idx + 1 + k, false)).join('') || '<div class="sp-note" style="padding:8px">Fim da fila.</div>') +
+                    (idx > 0 ? `<div class="sp-note" style="padding:8px">${idx} música(s) já tocada(s) nesta fila.</div>` : '');
+                return;
+            }
+            el.innerHTML = cab + '<div class="sp-note" style="padding:8px">Carregando fila...</div>';
+            const r = await spChamar('GET', '/v1/me/player/queue');
+            if (spTab !== 'fila') return;
+            if (!spOk(r)) { el.innerHTML = cab + `<div class="sp-err" style="margin:8px">${escapeHtml(spMsgErro(r))}</div>`; return; }
+            const d = r.data || {};
+            const tr = t => t && spUriOk(t.uri) ? spLinha({
+                act: '', titulo: t.name, sub: (t.artists || []).map(a => a.name).join(', '), img: spCapa(t.album),
+                add: String(t.uri).startsWith('spotify:track:') ? { uri: t.uri } : null
+            }) : '';
+            const prox = (d.queue || []).map(tr).join('');
+            el.innerHTML = cab + (d.currently_playing ? '<div class="sp-sec">Tocando agora</div>' + tr(d.currently_playing) : '') +
+                '<div class="sp-sec">A seguir (fila do Spotify)</div>' +
+                (prox || '<div class="sp-note" style="padding:8px">A fila está vazia.</div>') +
+                '<div class="sp-note" style="padding:8px">O Spotify mostra só as próximas músicas da fila. Use o Smart Shuffle para ver a ordem completa.</div>';
+        }
+
+        /* ---- Adicionar musica a uma playlist ---- */
+        let spPls = null, spPlsT = 0, spPickUri = '';
+        const spEscrevivel = p => p && ((spMe && p.owner && p.owner.id === spMe.id) || p.collaborative);
+        async function spCarregarPls(forcar) {
+            if (!forcar && spPls && Date.now() - spPlsT < 60000) return spPls;
+            const r = await spChamar('GET', '/v1/me/playlists?limit=50');
+            if (spOk(r)) { spPls = ((r.data && r.data.items) || []).filter(p => p && spIdOk(p.id) && spUriOk(p.uri)); spPlsT = Date.now(); }
+            return spPls || [];
+        }
+        async function spAbrirPicker(uri) {
+            if (!spUriOk(uri) || !String(uri).startsWith('spotify:track:')) return;
+            if (spInfo && spInfo.reauth) { spAviso('Para adicionar músicas a playlists, reautorize a conta (botão azul acima da lista).'); return; }
+            spPickUri = uri;
+            const box = document.getElementById('sp-picker');
+            box.classList.remove('hidden');
+            box.innerHTML = '<div class="sp-pick"><div class="sp-note" style="margin:6px">Carregando suas playlists...</div></div>';
+            const pls = (await spCarregarPls()).filter(spEscrevivel);
+            box.innerHTML = `<div class="sp-pick">
+                <div class="sp-voltar"><span>Adicionar a qual playlist?</span><button type="button" onclick="spFecharPicker()" title="Fechar"><i class="fa-solid fa-xmark"></i></button></div>
+                <div class="sp-row" data-act="nova" onclick="spClick(this)"><div class="sp-cover" style="display:flex;align-items:center;justify-content:center"><i class="fa-solid fa-plus"></i></div><div class="sp-r-t"><div class="sp-r-n">Nova playlist...</div></div></div>
+                ${pls.map(p => spLinha({ act: 'pick', id: p.id, name: p.name, img: spCapa(p), titulo: p.name, sub: ((p.items && p.items.total != null) ? p.items.total : (p.tracks && p.tracks.total)) + ' faixas' })).join('')}
+                ${pls.length ? '' : '<div class="sp-note" style="margin:8px">Você ainda não tem playlists editáveis.</div>'}
+            </div>`;
+        }
+        function spFecharPicker() { const b = document.getElementById('sp-picker'); if (b) { b.classList.add('hidden'); b.innerHTML = ''; } }
+        async function spAdicionar(id, nome) {
+            const uri = spPickUri;
+            spFecharPicker();
+            if (!spIdOk(id) || !uri) return;
+            const r = await spChamar('POST', `/v1/playlists/${id}/items`, { uris: [uri] });
+            if (spOk(r)) {
+                spPlsT = 0;
+                spAviso(`Adicionada a "${nome}".`, true);
+                if (spPlAtual && spPlAtual.id === id && spTab === 'playlists') spAbrirPlaylist(id, spPlAtual.nome, spPlAtual.uri, 0);
+            } else if (r.status === 403 || r.status === 401) {
+                spAviso('O Spotify recusou. Reautorize a conta para liberar a edição de playlists (e só playlists suas ou colaborativas aceitam músicas).');
+            } else spAviso(spMsgErro(r));
+        }
+        async function spNovaPlaylist() {
+            const nome = (prompt('Nome da nova playlist:') || '').trim();
+            if (!nome) return;
+            const r = await spChamar('POST', '/v1/me/playlists', { name: nome, public: false });
+            if (spOk(r) && r.data && spIdOk(r.data.id)) { spPlsT = 0; await spAdicionar(r.data.id, nome); }
+            else { spFecharPicker(); spAviso(spMsgErro(r)); }
+        }
+        function spAdicionarAtual() {
+            const t = spState && spState.track;
+            if (!t) { spAviso('Nenhuma música tocando agora.'); return; }
+            spAbrirPicker(t.uri);
         }
 
         function spAtualizarNow() {
             spShuffleBotao();
+            {
+                const cur = spState && spState.track ? spState.track.uri : '';
+                if (spTab === 'fila' && cur !== spUltimaFila) { spUltimaFila = cur; clearTimeout(spFilaT); spFilaT = setTimeout(spRenderFila, 400); }
+            }
             const t = spState && spState.track;
             const img = document.getElementById('sp-np-img');
             const src = t ? spImg(t.image) : '';
@@ -4600,6 +5297,12 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
                 const prof = parsed.userProfile || parsed.profile;
                 if (prof && typeof prof === 'object') state.userProfile = { ...state.userProfile, ...prof };
+
+                // Abas e divisoes do Vault + modo da ultima sessao (ensureLayout valida os ids).
+                if (parsed.editorLayout && typeof parsed.editorLayout === 'object' && Array.isArray(parsed.editorLayout.panes)) {
+                    state.editorLayout = parsed.editorLayout;
+                }
+                if (parsed.uiMode === 'notepad' || parsed.uiMode === 'tasks') state.uiMode = parsed.uiMode;
             }
         }
 
@@ -4662,6 +5365,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             sanitizeState();
             renderProfile();
             renderAll();
+            if (!falhou && state.uiMode === 'notepad' && appMode !== 'notepad') switchAppMode('notepad');
 
             if (falhou) {
                 const lbl = document.getElementById('status-save-label');
@@ -4975,6 +5679,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
         function switchAppMode(mode) {
             appMode = mode;
+            if (state.uiMode !== mode) { state.uiMode = mode; saveState(false); }
             const btnTasks = document.getElementById('mode-btn-tasks');
             const btnNotepad = document.getElementById('mode-btn-notepad');
             const sideTasks = document.getElementById('sidebar-tasks-panel');
@@ -6490,7 +7195,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     // Sanitiza tambem na LEITURA (notas antigas ou vindas de outra maquina).
                     ed.innerHTML = sanitizarHtml(note.content || '');
                     instalarSanitizacaoDoEditor(ed);
-                    hidratarQuadroDeTarefas(ed, note.id);
+                    hidratarQuadroDeTarefas(ed, note.id); linkificarArvore(ed, null);
                 }
             });
             renderPaneTabbars();
@@ -6504,6 +7209,8 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             if (t) t.value = note ? (note.title || '') : '';
             const btnIcon = document.getElementById('btn-current-note-icon');
             if (btnIcon) btnIcon.innerHTML = `<i class="${(note && note.icon) || 'fa-regular fa-file-lines'} text-sm" ${estiloIconeNota(note)}></i>`;
+            ntResEditId = null;
+            ntResRender();
         }
 
         function setFocusedPane(i) {
@@ -6766,6 +7473,120 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             // Mantido por compatibilidade: dispara o salvamento do painel em foco.
             onPaneInput(ensureLayout().focused);
         }
+
+        /* ---------------- Links no texto da Vault ---------------- */
+        const RE_URL_AUTO = /(?:https?:\/\/|www\.)[^\s<>"']*[^\s<>"'.,;:!?)\]}]/gi;
+        let _linkRange = null;
+
+        function _urlNormalizada(v) {
+            let u = String(v || '').trim();
+            if (!u) return '';
+            if (!/^[a-z][a-z0-9+.-]*:/i.test(u)) u = 'https://' + u;
+            return /^(https?:|mailto:)/i.test(u) ? u : null;
+        }
+
+        /* Troca URLs soltas de um no de texto por <a>. Devolve onde o cursor deve ficar. */
+        function _linkificarNo(tn, offset) {
+            const txt = tn.nodeValue;
+            RE_URL_AUTO.lastIndex = 0;
+            let m, ult = 0, achou = false, caret = null;
+            const frag = document.createDocumentFragment();
+            const add = (no, tam) => {
+                if (offset != null && caret === null && offset >= ult && offset <= ult + tam) {
+                    caret = { no: no.nodeType === 3 ? no : no.firstChild, off: offset - ult };
+                }
+                frag.appendChild(no);
+            };
+            while ((m = RE_URL_AUTO.exec(txt))) {
+                achou = true;
+                if (m.index > ult) { const p = txt.slice(ult, m.index); add(document.createTextNode(p), p.length); ult = m.index; }
+                const a = document.createElement('a');
+                a.href = /^www\./i.test(m[0]) ? 'https://' + m[0] : m[0];
+                a.textContent = m[0];
+                add(a, m[0].length); ult = m.index + m[0].length;
+            }
+            if (!achou) return null;
+            if (ult < txt.length) { const p = txt.slice(ult); add(document.createTextNode(p), p.length); }
+            tn.parentNode.replaceChild(frag, tn);
+            return caret || true;
+        }
+
+        function _textoLinkificavel(tn) {
+            const p = tn.parentElement;
+            return !!p && !p.closest('a, pre, code, .nx-taskblock, [contenteditable="false"]');
+        }
+
+        function linkificarArvore(raiz, pular) {
+            const nos = [];
+            const w = document.createTreeWalker(raiz, NodeFilter.SHOW_TEXT, null, false);
+            let n;
+            while ((n = w.nextNode())) if (n !== pular && _textoLinkificavel(n)) nos.push(n);
+            let mudou = false;
+            nos.forEach(t => { RE_URL_AUTO.lastIndex = 0; if (RE_URL_AUTO.test(t.nodeValue) && _linkificarNo(t, null)) mudou = true; });
+            return mudou;
+        }
+
+        function linkificarNoCursor(ed) {
+            const sel = window.getSelection();
+            if (!sel || !sel.rangeCount || !sel.isCollapsed) return false;
+            const tn = sel.anchorNode;
+            if (!tn || tn.nodeType !== 3 || !ed.contains(tn) || !_textoLinkificavel(tn)) return false;
+            const r = _linkificarNo(tn, sel.anchorOffset);
+            if (!r) return false;
+            if (r !== true && r.no) {
+                const nr = document.createRange();
+                nr.setStart(r.no, Math.min(r.off, r.no.nodeValue.length)); nr.collapse(true);
+                sel.removeAllRanges(); sel.addRange(nr);
+            }
+            return true;
+        }
+
+        function abrirLinkModal() {
+            const ed = getFocusedEditor();
+            if (!ed) { showToast('Abra uma nota do Vault primeiro.'); return; }
+            const sel = window.getSelection();
+            _linkRange = (sel && sel.rangeCount && ed.contains(sel.anchorNode)) ? sel.getRangeAt(0).cloneRange() : null;
+            if (!_linkRange) { showToast('Clique no texto da nota primeiro.'); return; }
+            const no = _linkRange.commonAncestorContainer;
+            const a = (no.nodeType === 1 ? no : no.parentElement).closest('a');
+            document.getElementById('linkUrlInput').value = a ? (a.getAttribute('href') || '') : '';
+            const m = document.getElementById('linkModal');
+            m.classList.remove('hidden'); m.classList.add('flex');
+            setTimeout(() => { const i = document.getElementById('linkUrlInput'); i.focus(); i.select(); }, 30);
+        }
+        function fecharLinkModal() {
+            const m = document.getElementById('linkModal');
+            if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+        }
+        function confirmarLink() {
+            const ed = getFocusedEditor();
+            const bruto = document.getElementById('linkUrlInput').value;
+            const url = _urlNormalizada(bruto);
+            if (url === null) { showToast('Use um link http(s):// ou mailto:.'); return; }
+            fecharLinkModal();
+            if (!ed || !_linkRange) return;
+            ed.focus();
+            const sel = window.getSelection();
+            sel.removeAllRanges(); sel.addRange(_linkRange);
+            if (!url) document.execCommand('unlink');
+            else if (sel.isCollapsed) {
+                const no = sel.anchorNode;
+                const a = (no.nodeType === 1 ? no : no.parentElement).closest('a');
+                if (a) a.setAttribute('href', url);
+                else document.execCommand('insertHTML', false, `<a href="${escapeHtml(url)}">${escapeHtml(bruto.trim())}</a>&nbsp;`);
+            } else document.execCommand('createLink', false, url);
+            _linkRange = null;
+            saveNoteContentLive();
+        }
+        document.addEventListener('keydown', e => {
+            const m = document.getElementById('linkModal');
+            if (m && !m.classList.contains('hidden')) {
+                if (e.key === 'Enter') { e.preventDefault(); confirmarLink(); }
+                else if (e.key === 'Escape') fecharLinkModal();
+            } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && e.target.closest && e.target.closest('.note-editor')) {
+                e.preventDefault(); abrirLinkModal();
+            }
+        });
 
         function limparFormatacao() {
             // removeFormat sozinho nao desfaz titulos (H1/H2): eles sao blocos,
@@ -7268,6 +8089,41 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 </div>
             `;
         }
+
+        /* Popup de visualizacao rapida: so mostra os campos preenchidos */
+        function openTaskPeek(id) {
+            const t = state.tasks.find(x => x.id === id);
+            if (!t) return;
+            const cat = t.categoryId && state.categories.find(c => c.id === t.categoryId);
+            const proj = t.projectId && state.projects.find(p => p.id === t.projectId);
+            const prog = Number(t.progress) || 0;
+            const steps = Array.isArray(t.steps) ? t.steps : [];
+            const anexos = Array.isArray(t.attachments) ? t.attachments : [];
+            const campo = (ic, rot, val) => `<div class="flex items-start gap-2"><i class="${ic} w-4 text-center text-gray-500 mt-0.5"></i><div class="min-w-0"><div class="text-[10px] uppercase tracking-wider text-gray-500">${rot}</div><div class="text-gray-200 break-words">${val}</div></div></div>`;
+            const partes = [];
+            if (cat) partes.push(campo('fa-solid fa-folder', 'Categoria', escapeHtml(cat.name)));
+            if (proj) partes.push(campo('fa-solid fa-diagram-project', 'Projeto', escapeHtml(proj.name)));
+            if (t.priority) partes.push(campo('fa-solid fa-flag', 'Prioridade', escapeHtml(t.priority)));
+            if (t.dueDate) partes.push(campo('fa-regular fa-calendar', 'Data limite', formatDateBR(t.dueDate)));
+            if (prog > 0) partes.push(campo('fa-solid fa-chart-simple', 'Progresso', `<div class="h-1.5 bg-white/10 rounded mt-1 w-40"><div class="h-full bg-[#4272c4] rounded" style="width:${Math.min(prog, 100)}%"></div></div><span class="font-mono text-[11px]">${prog}%</span>`));
+            if (t.isMyDay === true) partes.push(campo('fa-solid fa-sun', 'Meu Dia', 'Sim'));
+            if (t.isStarred) partes.push(campo('fa-solid fa-star', 'Importante', 'Sim'));
+            if (t.notes && String(t.notes).trim()) partes.push(campo('fa-regular fa-note-sticky', 'Notas', escapeHtml(String(t.notes).trim()).replace(/\n/g, '<br>')));
+            if (steps.length) partes.push(campo('fa-solid fa-list-check', `Etapas (${steps.filter(x => x.completed).length}/${steps.length})`,
+                steps.map(x => `<div class="${x.completed ? 'line-through text-gray-500' : ''}">${x.completed ? '&#10003;' : '&#9675;'} ${escapeHtml(x.title || '')}</div>`).join('')));
+            if (anexos.length) partes.push(campo('fa-solid fa-paperclip', 'Anexos', anexos.map(a => `<div>${escapeHtml(a.name || '')}</div>`).join('')));
+            if (t.createdAt) partes.push(campo('fa-regular fa-clock', 'Criada em', formatDateBR(String(t.createdAt).split('T')[0])));
+            document.getElementById('taskPeekTitle').textContent = t.title || '';
+            document.getElementById('taskPeekBody').innerHTML = partes.join('');
+            document.getElementById('taskPeekOpen').onclick = () => { closeTaskPeek(); openTaskFromNotif(id); };
+            const m = document.getElementById('taskPeekModal');
+            m.classList.remove('hidden'); m.classList.add('flex');
+        }
+        function closeTaskPeek() {
+            const m = document.getElementById('taskPeekModal');
+            if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+        }
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') closeTaskPeek(); });
 
         function abrirNotificacoesModal() {
             checkDeadlinesAndNotify(false);
@@ -8032,6 +8888,24 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             if (!ed || ed.dataset.sanitizado === '1') return;
             ed.dataset.sanitizado = '1';
 
+            // Links: URL digitada/colada vira link; clique abre no navegador.
+            ed.addEventListener('input', function (e) {
+                if (e.inputType === 'insertText' && e.data && /\s/.test(e.data)) linkificarNoCursor(ed);
+                else if (e.inputType === 'insertParagraph') {
+                    const sel = window.getSelection();
+                    if (linkificarArvore(ed, sel && sel.anchorNode)) onPaneInput(Number(ed.dataset.pane));
+                }
+            });
+            ed.addEventListener('click', function (e) {
+                const a = e.target.closest && e.target.closest('a[href]');
+                if (!a || !ed.contains(a)) return;
+                e.preventDefault();
+                const api = window.pywebview && window.pywebview.api;
+                if (api && api.open_external_target) {
+                    api.open_external_target(a.href).then(r => { if (r && r.status === 'error') showToast(r.message || 'Não foi possível abrir o link.'); });
+                }
+            });
+
             ed.addEventListener('paste', function (e) {
                 e.preventDefault();
                 const dt = e.clipboardData || window.clipboardData;
@@ -8043,6 +8917,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 } else {
                     document.execCommand('insertText', false, texto || '');
                 }
+                setTimeout(() => { if (linkificarArvore(ed, null)) onPaneInput(Number(ed.dataset.pane)); }, 0);
             });
 
             ed.addEventListener('drop', function (e) {
@@ -8055,6 +8930,72 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 }
             });
         }
+
+        // Barra unica: o header faz o papel da barra de titulo do Windows.
+        (function () {
+            const ICO_MAX = '<svg width="10" height="10" viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" fill="none" stroke="currentColor"/></svg>';
+            const ICO_RES = '<svg width="10" height="10" viewBox="0 0 10 10"><path d="M2.5 2.5v-2h7v7h-2M.5 2.5h7v7h-7z" fill="none" stroke="currentColor"/></svg>';
+            const api = () => window.pywebview && window.pywebview.api;
+            function setMax(m) {
+                document.querySelectorAll('.nx-rz').forEach(z => { z.style.display = m ? 'none' : 'block'; });
+                const b = document.getElementById('nx-wc-max');
+                if (b) { b.innerHTML = m ? ICO_RES : ICO_MAX; b.title = m ? 'Restaurar' : 'Maximizar'; }
+            }
+            window.nxWin = async function (fn) {
+                try { const r = await api()[fn](); if (fn === 'win_toggle_maximize') setMax(r); } catch (e) {}
+            };
+            window.addEventListener('pywebviewready', async function () {
+                try {
+                    // 'shown' do pywebview pode chegar depois do ready: tenta por ~3s.
+                    let ok = false;
+                    for (let i = 0; i < 15 && !ok; i++) {
+                        ok = await api().win_chrome();
+                        if (!ok) await new Promise(r => setTimeout(r, 200));
+                    }
+                    if (!ok) return;
+                    document.getElementById('nx-winctl').classList.replace('hidden', 'flex');
+                    let busy = false;
+                    function arrastar(e, edge) {
+                        if (e.button !== 0) return;
+                        e.preventDefault();
+                        api().win_drag_begin(edge);
+                        const mv = () => { if (busy) return; busy = true; api().win_drag_step().finally(() => { busy = false; }); };
+                        const up = () => {
+                            window.removeEventListener('mousemove', mv, true);
+                            window.removeEventListener('mouseup', up, true);
+                            api().win_drag_end();
+                        };
+                        window.addEventListener('mousemove', mv, true);
+                        window.addEventListener('mouseup', up, true);
+                    }
+                    document.getElementById('nx-titlebar').addEventListener('mousedown', function (e) {
+                        if (e.target.closest('button,a,input,select,textarea')) return;
+                        if (e.detail === 2) { nxWin('win_toggle_maximize'); return; }
+                        arrastar(e, '');
+                    });
+                    // Alcas de redimensionamento (bordas e cantos).
+                    const T = 5, C = 10;
+                    [['n', 'top:0;left:' + C + 'px;right:' + C + 'px;height:' + T + 'px;cursor:ns-resize'],
+                     ['s', 'bottom:0;left:' + C + 'px;right:' + C + 'px;height:' + T + 'px;cursor:ns-resize'],
+                     ['w', 'left:0;top:' + C + 'px;bottom:' + C + 'px;width:' + T + 'px;cursor:ew-resize'],
+                     ['e', 'right:0;top:' + C + 'px;bottom:' + C + 'px;width:' + T + 'px;cursor:ew-resize'],
+                     ['nw', 'top:0;left:0;width:' + C + 'px;height:' + C + 'px;cursor:nwse-resize'],
+                     ['ne', 'top:0;right:0;width:' + C + 'px;height:' + C + 'px;cursor:nesw-resize'],
+                     ['sw', 'bottom:0;left:0;width:' + C + 'px;height:' + C + 'px;cursor:nesw-resize'],
+                     ['se', 'bottom:0;right:0;width:' + C + 'px;height:' + C + 'px;cursor:nwse-resize']
+                    ].forEach(([edge, css]) => {
+                        const d = document.createElement('div');
+                        d.className = 'nx-rz';
+                        d.style.cssText = 'position:fixed;z-index:2147483647;' + css;
+                        d.addEventListener('mousedown', e => arrastar(e, edge));
+                        document.body.appendChild(d);
+                    });
+                    const sync = async () => setMax(await api().win_is_maximized());
+                    window.addEventListener('resize', sync);
+                    sync();
+                } catch (e) {}
+            });
+        })();
 
         function escapeHtml(str) { return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
         function escapeJsStr(str) { return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
@@ -8080,6 +9021,7 @@ def main():
             resizable=True
         )
         api.set_window(window)
+        window.events.shown += (lambda: _instalar_chrome_unico(window))
         window.events.closing += (lambda: api._spotify_encerrar())
         # Garantia de saida: a janela do Spotify nao pode manter o processo vivo
         # (um processo fantasma prende o perfil do WebView2 e quebra a proxima abertura).
