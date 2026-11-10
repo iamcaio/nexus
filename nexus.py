@@ -28,7 +28,7 @@ except Exception as e:
     show_native_error_dialog("Erro ao Iniciar - NEXUS", err_msg)
     sys.exit(1)
 
-APP_VERSION = "v6.3.18"
+APP_VERSION = "v6.3.19"
 
 # ---------------------------------------------------------------------------
 # NOTIFICAÇÕES DESKTOP E ÍCONE NA BARRA DE TAREFAS (WINDOWS)
@@ -3094,6 +3094,26 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         .nx-wc { width:46px; display:flex; align-items:center; justify-content:center; color:#d3d3d3; background:transparent; border:0; cursor:default; }
         .nx-wc:hover { background:rgba(255,255,255,.1); }
         .nx-wc-close:hover { background:#e81123; color:#fff; }
+        #updToast { position:fixed; top:56px; right:16px; z-index:200; width:340px; max-width:calc(100vw - 32px); background:#101010; border:1px solid #2a2a2a; border-radius:12px; box-shadow:0 14px 40px rgba(0,0,0,.65); padding:12px; animation:nxToastIn .3s cubic-bezier(.2,.8,.2,1) both; }
+        #updToast.hidden { display:none; }
+        .upd-toast-head { display:flex; gap:10px; align-items:flex-start; }
+        .upd-toast-ico { width:30px; height:30px; border-radius:8px; background:rgba(66,114,196,.18); color:#7aa7f0; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .upd-toast-txt { flex:1; min-width:0; }
+        .upd-toast-title { font-size:13px; font-weight:700; color:#fff; }
+        .upd-toast-sub { font-size:11px; color:#8a8a8e; margin-top:2px; }
+        .upd-toast-x { color:#6b7280; padding:2px 4px; cursor:pointer; }
+        .upd-toast-x:hover { color:#fff; }
+        .upd-toast-notes { margin-top:10px; padding:8px 10px; max-height:140px; overflow-y:auto; background:#070707; border:1px solid #232323; border-radius:8px; font-size:12px; color:#c9c9c9; white-space:pre-wrap; overflow-wrap:anywhere; }
+        .upd-toast-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
+        .upd-btn, .upd-btn-main { font-size:12px; font-weight:600; padding:5px 12px; border-radius:7px; cursor:pointer; border:1px solid #2f2f2f; color:#d3d3d3; background:#181818; }
+        .upd-btn:hover { background:#222; color:#fff; }
+        .upd-btn-main { background:#4272c4; border-color:#4272c4; color:#fff; }
+        .upd-btn-main:hover { background:#5282d4; }
+        .upd-btn-main:disabled { opacity:.5; cursor:default; }
+        .upd-btn-link { border-color:transparent; background:transparent; color:#7aa7f0; padding-left:6px; padding-right:6px; }
+        .upd-btn-link:hover { background:rgba(66,114,196,.12); color:#a9c6f7; }
+        .upd-toast-bar { height:5px; background:#222; border-radius:99px; overflow:hidden; margin-top:12px; }
+        .upd-toast-bar span { display:block; height:100%; width:0; background:#4272c4; transition:width .3s; }
         .nx-toast i { color:#34d399; }
         .nx-toast.out { animation:nxToastOut .25s ease-in both; }
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; } }
@@ -3804,6 +3824,27 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     </div>
 
     <!-- ================= ATUALIZACAO ================= -->
+    <div id="updToast" class="hidden" role="alert" aria-live="polite">
+        <div class="upd-toast-head">
+            <span class="upd-toast-ico"><i class="fa-solid fa-circle-arrow-up"></i></span>
+            <div class="upd-toast-txt">
+                <div class="upd-toast-title">Nova versão <b id="updToastVer"></b> disponível</div>
+                <div class="upd-toast-sub" id="updToastSub"></div>
+            </div>
+            <button type="button" class="upd-toast-x" onclick="dispensarAvisoUpdate()" title="Fechar" aria-label="Fechar"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div id="updToastNotes" class="upd-toast-notes hidden"></div>
+        <div id="updToastProg" class="hidden">
+            <div class="upd-toast-bar"><span id="updToastBar"></span></div>
+            <div class="upd-toast-sub" id="updToastPhase">Preparando...</div>
+        </div>
+        <div class="upd-toast-actions" id="updToastActions">
+            <button type="button" class="upd-btn-main" id="updToastInstall" onclick="instalarDoAviso()"><i class="fa-solid fa-download"></i> Instalar</button>
+            <button type="button" class="upd-btn" onclick="dispensarAvisoUpdate()">Depois</button>
+            <button type="button" class="upd-btn upd-btn-link" id="updToastNotesBtn" onclick="alternarNotasDoAviso()"><i class="fa-regular fa-file-lines"></i> Notas da atualização</button>
+        </div>
+    </div>
+
     <div id="updateModal" class="fixed inset-0 bg-black/70 z-[60] hidden items-center justify-center p-4">
         <div class="bg-[#0a0a0a] border border-[#262626] rounded w-full max-w-lg max-h-[92vh] overflow-y-auto">
             <div class="p-4 border-b border-[#262626] flex items-center justify-between">
@@ -8640,6 +8681,65 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             }
         }
 
+        /* Aviso no canto superior direito: aparece ao abrir o app quando ha versao nova. */
+        let updAvisoDispensado = '';
+        let updToastTimer = null;
+        function mostrarAvisoUpdate(info) {
+            const el = document.getElementById('updToast');
+            if (!el || !info || info.status !== 'update_available' || !info.hasHash) return;
+            if (updAvisoDispensado === info.latest || (el.dataset.ver === info.latest && !el.classList.contains('hidden'))) return;
+            el.dataset.ver = info.latest;
+            document.getElementById('updToastVer').textContent = info.latest;
+            document.getElementById('updToastSub').textContent = 'Você está na ' + info.current
+                + (info.size ? ' · ' + (info.size / 1048576).toFixed(1) + ' MB' : '');
+            const n = document.getElementById('updToastNotes');
+            n.textContent = info.notes || 'Sem notas para esta versão.';
+            n.classList.add('hidden');
+            document.getElementById('updToastNotesBtn').style.display = '';
+            document.getElementById('updToastProg').classList.add('hidden');
+            document.getElementById('updToastActions').classList.remove('hidden');
+            el.classList.remove('hidden');
+        }
+        function dispensarAvisoUpdate() {
+            const el = document.getElementById('updToast');
+            if (!el) return;
+            updAvisoDispensado = el.dataset.ver || '';
+            el.classList.add('hidden');
+        }
+        function alternarNotasDoAviso() {
+            document.getElementById('updToastNotes').classList.toggle('hidden');
+        }
+        async function instalarDoAviso() {
+            const btn = document.getElementById('updToastInstall');
+            try {
+                btn.disabled = true;
+                document.getElementById('updToastProg').classList.remove('hidden');
+                document.getElementById('updToastActions').classList.add('hidden');
+                await window.pywebview.api.update_install();
+                if (updToastTimer) clearInterval(updToastTimer);
+                updToastTimer = setInterval(async () => {
+                    try {
+                        const p = await window.pywebview.api.update_progress();
+                        if (!p) return;
+                        document.getElementById('updToastBar').style.width = (p.pct || 0) + '%';
+                        const ph = document.getElementById('updToastPhase');
+                        ph.textContent = (UPD_FASES[p.fase] || p.fase || '') + (p.fase === 'downloading' ? ' ' + (p.pct || 0) + '%' : '');
+                        if (p.fase === 'error') {
+                            clearInterval(updToastTimer); updToastTimer = null;
+                            ph.textContent = p.mensagem || 'Falha na atualização.';
+                            btn.disabled = false;
+                            document.getElementById('updToastActions').classList.remove('hidden');
+                        }
+                    } catch (e) { /* app fechando durante a instalacao: normal */ }
+                }, 500);
+            } catch (e) {
+                btn.disabled = false;
+                document.getElementById('updToastProg').classList.add('hidden');
+                document.getElementById('updToastActions').classList.remove('hidden');
+                showToast('Não foi possível iniciar a atualização.');
+            }
+        }
+
         function pintarBadgeUpdate(info) {
             const dot = document.getElementById('updateDot');
             const lbl = document.getElementById('updateDotLabel');
@@ -8661,7 +8761,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 const r = manual
                     ? await window.pywebview.api.update_check_now()
                     : await window.pywebview.api.update_cached();
-                if (r) { updInfo = r; pintarUpdateModal(r); pintarBadgeUpdate(r); }
+                if (r) { updInfo = r; pintarUpdateModal(r); pintarBadgeUpdate(r); if (!manual) mostrarAvisoUpdate(r); }
                 if (manual && r && r.status === 'up_to_date') showToast('Nenhuma atualizacao disponivel.');
                 return r;
             } catch (e) {

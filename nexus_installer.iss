@@ -19,7 +19,7 @@
 ; ===========================================================================
 
 #define MyAppName        "NEXUS"
-#define MyAppVersion     "6.3.18"
+#define MyAppVersion     "6.3.19"
 #define MyAppPublisher   "NEXUS"
 #define MyAppExeName     "NEXUS.exe"
 
