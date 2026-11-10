@@ -28,7 +28,7 @@ except Exception as e:
     show_native_error_dialog("Erro ao Iniciar - NEXUS", err_msg)
     sys.exit(1)
 
-APP_VERSION = "v6.3.17"
+APP_VERSION = "v6.3.18"
 
 # ---------------------------------------------------------------------------
 # NOTIFICAÇÕES DESKTOP E ÍCONE NA BARRA DE TAREFAS (WINDOWS)
