@@ -63,13 +63,20 @@ if ($DryRun) {
 # ---------------------------------------------------------------------------
 #  0. A versao nao pode ser menor que a ultima publicada
 # ---------------------------------------------------------------------------
+# A numeracao recomecou em 0.0.1 depois da 6.3.x: 6.x ou maior e a serie
+# antiga (0), 0.x-5.x a serie nova (1). Mesma regra do updater (_versao_chave).
+function Get-ChaveVersao([string]$v) {
+    $x = [version]($v -replace '^v', '')
+    $serie = if ($x.Major -ge 6) { 0 } else { 1 }
+    return '{0}.{1:D5}.{2:D5}.{3:D5}' -f $serie, $x.Major, $x.Minor, [math]::Max($x.Build, 0)
+}
 $tags = @(git tag -l "v*" 2>$null)
 if ($tags.Count -gt 0) {
     $maior = $tags |
-        ForEach-Object { [version]($_ -replace '^v', '') } |
-        Sort-Object -Descending |
+        Sort-Object -Property @{ Expression = { Get-ChaveVersao $_ } } -Descending |
         Select-Object -First 1
-    if ([version]$Version -le $maior) {
+    $maior = $maior -replace '^v', ''
+    if ((Get-ChaveVersao $Version) -le (Get-ChaveVersao $maior)) {
         Write-Host ""
         Write-Host "  A versao $Version nao e maior que a ultima tag (v$maior)." -ForegroundColor Red
         Write-Host ""

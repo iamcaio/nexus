@@ -4,7 +4,6 @@
       ".read": "auth != null",
       ".write": "auth != null"
     },
-
     "apps": {
       "nexus": {
         "_release": {
@@ -13,11 +12,19 @@
         "users": {
           "$uid": {
             ".read": "auth != null && auth.uid == $uid",
-            ".write": "auth != null && auth.uid == $uid"
+            ".write": "auth != null && auth.uid == $uid",
+            "database": {
+              ".validate": "newData.hasChildren()"
+            },
+            "_migratedFrom": {
+              ".validate": "newData.isString() && newData.val().length < 200"
+            },
+            "$other": {
+              ".validate": false
+            }
           }
         }
       },
-
       "donext": {
         "users": {
           "$uid": {
@@ -26,7 +33,6 @@
           }
         }
       },
-
       "cogni": {
         "users": {
           "$uid": {

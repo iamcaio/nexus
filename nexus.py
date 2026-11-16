@@ -28,7 +28,7 @@ except Exception as e:
     show_native_error_dialog("Erro ao Iniciar - NEXUS", err_msg)
     sys.exit(1)
 
-APP_VERSION = "v6.3.19"
+APP_VERSION = "v6.3.23"
 
 # ---------------------------------------------------------------------------
 # NOTIFICAÇÕES DESKTOP E ÍCONE NA BARRA DE TAREFAS (WINDOWS)
@@ -235,8 +235,9 @@ class WindowsNotifier:
     def notify(title, message, sound=True):
         def _run():
             try:
-                clean_title = str(title or "NEXUS").replace('"', '`"').replace('$', '`$').replace("'", "`'")
-                clean_msg = str(message or "").replace('"', '`"').replace('$', '`$').replace("'", "`'")
+                _x = lambda v: str(v).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                clean_title = _x(title or "NEXUS").replace('"', '`"').replace('$', '`$').replace("'", "`'")
+                clean_msg = _x(message or "").replace('"', '`"').replace('$', '`$').replace("'", "`'")
                 audio_tag = '<audio src="ms-winsoundevent:Notification.Default" />' if sound else '<audio silent="true" />'
                 
                 ps_script = f'''
@@ -544,13 +545,25 @@ def _versao_tupla(v):
         return (0, 0, 0)
 
 
+def _versao_chave(v):
+    """Chave de ordenacao com SERIE na frente.
+
+    A numeracao recomecou em v0.0.1 depois da 6.3.x. Toda versao 6.x ou maior
+    pertence a serie antiga (0) e qualquer 0.x-5.x a serie nova (1), entao
+    0.0.1 > 6.3.23. Quem ainda esta na 6.3.x chega aqui pela versao ponte
+    6.3.23, que ja tem esta regra.
+    """
+    t = _versao_tupla(v)
+    return ((0,) if t[0] >= 6 else (1,)) + t
+
+
 def _versao_maior(a, b):
     """True se a > b comparando semanticamente, nao como texto.
 
     Detalhe que quebra comparacao por string: '6.10.0' > '6.9.0' e verdadeiro
     numericamente e FALSO alfabeticamente. Por isso a comparacao e por tupla.
     """
-    return _versao_tupla(a) > _versao_tupla(b)
+    return _versao_chave(a) > _versao_chave(b)
 
 
 class AutoUpdater:
@@ -1310,98 +1323,6 @@ class CloudSync:
 
 
 
-# ---------------------------------------------------------------------------
-# PAINEL SPOTIFY - opcao 3: player PROPRIO (Web API + Web Playback SDK)
-# O NEXUS desenha a interface (tema, sem janela nativa por cima). O audio toca
-# num <iframe> invisivel que carrega o Web Playback SDK de um servidor local
-# (127.0.0.1:SPOTIFY_PORT). Login por OAuth PKCE no navegador padrao; o token
-# fica no Python (a interface chama a Web API por spotify_api).
-# Exige Spotify Premium (regra do SDK) e um app no Spotify for Developers.
-# O backup da opcao 2 (janela WebView2 do player web) esta em backups\.
-# ---------------------------------------------------------------------------
-SPOTIFY_PORT = 8898
-SPOTIFY_REDIRECT = "http://127.0.0.1:%d/callback" % SPOTIFY_PORT
-SPOTIFY_SCOPES = ("streaming user-read-email user-read-private user-read-playback-state "
-                  "user-modify-playback-state user-read-currently-playing "
-                  "playlist-read-private playlist-read-collaborative user-library-read "
-                  "playlist-modify-public playlist-modify-private")
-
-_SPOTIFY_PLAYER_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>NEXUS Player</title></head><body>
-<script>
-(function () {
-  var N = new URLSearchParams(location.search).get('n') || '';
-  var player = null;
-  function post(o) { try { o.nxsp = 1; parent.postMessage(o, '*'); } catch (e) { } }
-  function slim(s) {
-    if (!s) return null;
-    var t = s.track_window && s.track_window.current_track;
-    if (!t) return { paused: true, track: null };
-    var imgs = (t.album && t.album.images) || [];
-    return { paused: s.paused, position: s.position, duration: s.duration, ts: s.timestamp,
-      shuffle: s.shuffle, repeat: s.repeat_mode,
-      track: { uri: t.uri, name: t.name, artists: (t.artists || []).map(function (a) { return a.name; }),
-               image: (imgs[imgs.length > 1 ? 1 : 0] || {}).url || '' },
-      context: (s.context && s.context.uri) || '' };
-  }
-  window.onSpotifyWebPlaybackSDKReady = function () {
-    player = new Spotify.Player({
-      name: 'NEXUS', volume: 0.6,
-      getOAuthToken: function (cb) {
-        fetch('/token?n=' + encodeURIComponent(N), { cache: 'no-store' })
-          .then(function (r) { return r.json(); })
-          .then(function (j) { if (j && j.token) cb(j.token); else post({ type: 'error', kind: 'authentication_error', msg: 'Sem token' }); })
-          .catch(function () { post({ type: 'error', kind: 'authentication_error', msg: 'Falha ao obter token' }); });
-      }
-    });
-    player.addListener('ready', function (e) { post({ type: 'ready', device_id: e.device_id }); });
-    player.addListener('not_ready', function () { post({ type: 'not_ready' }); });
-    player.addListener('player_state_changed', function (s) { post({ type: 'state', state: slim(s) }); });
-    ['initialization_error', 'authentication_error', 'account_error', 'playback_error'].forEach(function (k) {
-      player.addListener(k, function (e) { post({ type: 'error', kind: k, msg: (e && e.message) || k }); });
-    });
-    player.connect().then(function (ok) { if (!ok) post({ type: 'error', kind: 'connect', msg: 'Nao foi possivel iniciar o player' }); });
-  };
-  window.addEventListener('message', function (e) {
-    if (e.source !== parent || !player) return;
-    var m = e.data; if (!m || !m.nxsp) return;
-    switch (m.cmd) {
-      case 'toggle': player.togglePlay(); break;
-      case 'next': player.nextTrack(); break;
-      case 'prev': player.previousTrack(); break;
-      case 'seek': player.seek(Math.max(0, Number(m.ms) || 0)); break;
-      case 'volume': player.setVolume(Math.min(1, Math.max(0, Number(m.v)))); break;
-      case 'activate': try { player.activateElement(); } catch (x) { } break;
-      case 'state': player.getCurrentState().then(function (s) { post({ type: 'state', state: slim(s) }); }); break;
-    }
-  });
-  var sc = document.createElement('script');
-  sc.src = 'https://sdk.scdn.co/spotify-player.js';
-  sc.onerror = function () { post({ type: 'error', kind: 'sdk', msg: 'Nao foi possivel carregar o SDK do Spotify (rede bloqueada?)' }); };
-  document.head.appendChild(sc);
-})();
-</script></body></html>"""
-
-
-def _dpapi(dados, cifrar):
-    """Protege/abre bytes com a chave do usuario do Windows (DPAPI)."""
-    import ctypes
-    from ctypes import wintypes
-
-    class _BLOB(ctypes.Structure):
-        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.c_void_p)]
-
-    buf = ctypes.create_string_buffer(dados, len(dados))
-    entrada = _BLOB(len(dados), ctypes.cast(buf, ctypes.c_void_p))
-    saida = _BLOB()
-    fn = ctypes.windll.crypt32.CryptProtectData if cifrar else ctypes.windll.crypt32.CryptUnprotectData
-    if not fn(ctypes.byref(entrada), None, None, None, None, 0, ctypes.byref(saida)):
-        raise OSError("DPAPI falhou")
-    try:
-        return ctypes.string_at(saida.pbData, saida.cbData)
-    finally:
-        ctypes.windll.kernel32.LocalFree(ctypes.c_void_p(saida.pbData))
-
-
 class NexusDesktopAPI:
     r"""
     Bridge Python entre a interface gráfica NEXUS e o sistema operacional.
@@ -1764,313 +1685,62 @@ class NexusDesktopAPI:
     def win_drag_end(self):
         self._drag = None
 
-    # ------------------------------------------------------------------ #
-    # Painel Spotify (opcao 3)
-    # ------------------------------------------------------------------ #
-    def _sp_st(self):
-        if not hasattr(self, "_spx"):
-            import base64
-            self._spx = {"cfg": None, "access": "", "exp": 0.0, "server": None, "auth": None,
-                         "nonce": base64.urlsafe_b64encode(os.urandom(18)).decode().rstrip("="),
-                         "erro": None, "lock": threading.Lock()}
-        return self._spx
-
-    def _sp_cfg(self):
-        st = self._sp_st()
-        if st["cfg"] is None:
-            cfg = {}
-            try:
-                with open(os.path.join(self._base_dir, "spotify.json"), "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-            except Exception:
-                cfg = {}
-            st["cfg"] = cfg if isinstance(cfg, dict) else {}
-        return st["cfg"]
-
-    def _sp_cfg_save(self):
-        caminho = os.path.join(self._base_dir, "spotify.json")
-        tmp = caminho + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self._sp_cfg(), f)
-        os.replace(tmp, caminho)
-
-    def _sp_refresh_get(self):
-        import base64
-        cfg = self._sp_cfg()
-        r = cfg.get("refresh")
-        if not r:
-            return ""
-        try:
-            raw = base64.b64decode(r)
-            if cfg.get("enc"):
-                raw = _dpapi(raw, False)
-            return raw.decode("utf-8")
-        except Exception:
-            return ""
-
-    def _sp_refresh_set(self, token):
-        import base64
-        raw, enc = token.encode("utf-8"), False
-        try:
-            raw, enc = _dpapi(raw, True), True       # criptografado com a conta do Windows
-        except Exception:
-            pass
-        cfg = self._sp_cfg()
-        cfg["refresh"] = base64.b64encode(raw).decode("ascii")
-        cfg["enc"] = enc
-        self._sp_cfg_save()
-
-    def _sp_http(self, method, url, body=None, headers=None, timeout=20):
-        data = None
-        if body is not None:
-            data = body if isinstance(body, (bytes, bytearray)) else str(body).encode("utf-8")
-        req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx_strict) as r:
-                return r.status, r.read(), dict(r.headers)
-        except urllib.error.HTTPError as e:
-            return e.code, e.read(), dict(e.headers or {})
-
-    def _sp_token_form(self, campos):
-        import urllib.parse
-        status, corpo, _ = self._sp_http(
-            "POST", "https://accounts.spotify.com/api/token", urllib.parse.urlencode(campos),
-            {"Content-Type": "application/x-www-form-urlencoded"})
-        try:
-            j = json.loads(corpo.decode("utf-8", "replace"))
-        except Exception:
-            j = {}
-        return status, (j if isinstance(j, dict) else {})
-
-    def _sp_access(self):
-        """Access token valido (renova com o refresh token quando preciso)."""
-        st = self._sp_st()
-        with st["lock"]:
-            if st["access"] and time.time() < st["exp"] - 60:
-                return st["access"]
-            ref, cid = self._sp_refresh_get(), self._sp_cfg().get("client_id", "")
-            if not ref or not cid:
-                return ""
-            try:
-                status, j = self._sp_token_form({"grant_type": "refresh_token", "refresh_token": ref, "client_id": cid})
-            except Exception as e:
-                st["erro"] = "Sem conexao com o Spotify: " + str(e)
-                return ""
-            if status == 200 and j.get("access_token"):
-                st["access"], st["exp"] = j["access_token"], time.time() + int(j.get("expires_in", 3600))
-                if j.get("refresh_token"):
-                    self._sp_refresh_set(j["refresh_token"])
-                st["erro"] = None
-                return st["access"]
-            if status in (400, 401):                 # refresh token revogado/expirado
-                self._sp_limpar_sessao()
-            st["erro"] = "O Spotify recusou a renovacao do login (%s)." % status
-            return ""
-
-    def _sp_limpar_sessao(self):
-        st = self._sp_st()
-        st["access"], st["exp"] = "", 0.0
-        cfg = self._sp_cfg()
-        cfg.pop("refresh", None)
-        cfg.pop("enc", None)
-        try:
-            self._sp_cfg_save()
-        except Exception:
-            pass
-
-    def _sp_servidor(self):
-        """Sobe (uma vez) o servidor local: /callback (OAuth), /player e /token."""
-        st = self._sp_st()
-        if st["server"]:
-            return True
-        import http.server
-        import html as _html
-        import urllib.parse
-        import base64
-        api = self
-
-        class H(http.server.BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.0"
-
-            def log_message(self, *a):
-                pass
-
-            def _send(self, code, ctype, corpo):
-                b = corpo.encode("utf-8") if isinstance(corpo, str) else corpo
-                self.send_response(code)
-                self.send_header("Content-Type", ctype)
-                self.send_header("Content-Length", str(len(b)))
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Referrer-Policy", "no-referrer")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                self.wfile.write(b)
-
-            def _callback(self, q):
-                code = (q.get("code") or [""])[0]
-                state = (q.get("state") or [""])[0]
-                err = (q.get("error") or [""])[0]
-                auth, msg, ok = st["auth"], "", False
-                if err:
-                    msg = "Autorizacao negada (%s)." % err
-                elif not auth or not code or state != auth["state"] or time.time() - auth["t"] > 600:
-                    msg = "Pedido invalido ou expirado. Volte ao NEXUS e clique em Conectar de novo."
-                else:
-                    try:
-                        status, j = api._sp_token_form({
-                            "grant_type": "authorization_code", "code": code, "redirect_uri": SPOTIFY_REDIRECT,
-                            "client_id": api._sp_cfg().get("client_id", ""), "code_verifier": auth["verifier"]})
-                        if status == 200 and j.get("refresh_token"):
-                            st["access"], st["exp"] = j.get("access_token", ""), time.time() + int(j.get("expires_in", 3600))
-                            api._sp_cfg()["scope"] = str(j.get("scope", ""))     # escopos realmente concedidos
-                            api._sp_refresh_set(j["refresh_token"])
-                            st["auth"], st["erro"], ok = None, None, True
-                        else:
-                            msg = "O Spotify recusou o codigo (%s) %s" % (status, j.get("error_description", ""))
-                    except Exception as e:
-                        msg = "Falha ao concluir o login: " + str(e)
-                titulo = "NEXUS conectado ao Spotify" if ok else "Nao foi possivel conectar"
-                corpo = ("<!doctype html><meta charset=utf-8><title>NEXUS</title>"
-                         "<body style='background:#0a0a0a;color:#e5e5e5;font-family:Segoe UI,sans-serif;"
-                         "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>"
-                         "<div style='text-align:center'><h2>%s</h2><p>%s</p></div></body>" % (
-                             _html.escape(titulo),
-                             "Pode fechar esta aba e voltar ao NEXUS." if ok else _html.escape(msg)))
-                self._send(200 if ok else 400, "text/html; charset=utf-8", corpo)
-
-            def do_GET(self):
-                try:
-                    if (self.headers.get("Host") or "") != "127.0.0.1:%d" % SPOTIFY_PORT:
-                        return self._send(403, "text/plain", "host")      # defesa contra DNS rebinding
-                    u = urllib.parse.urlparse(self.path)
-                    q = urllib.parse.parse_qs(u.query)
-                    if u.path == "/callback":
-                        return self._callback(q)
-                    if (q.get("n") or [""])[0] != st["nonce"]:
-                        return self._send(403, "text/plain", "nonce")
-                    if u.path == "/player":
-                        return self._send(200, "text/html; charset=utf-8", _SPOTIFY_PLAYER_HTML)
-                    if u.path == "/token":
-                        if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin"):
-                            return self._send(403, "text/plain", "origem")
-                        tok = api._sp_access()
-                        return self._send(200 if tok else 401, "application/json", json.dumps({"token": tok}))
-                    self._send(404, "text/plain", "nao encontrado")
-                except Exception:
-                    try:
-                        self._send(500, "text/plain", "erro")
-                    except Exception:
-                        pass
-
-        class S(http.server.ThreadingHTTPServer):
-            daemon_threads = True
-            allow_reuse_address = False      # no Windows, reuse permitiria outro processo roubar a porta
-
-        try:
-            srv = S(("127.0.0.1", SPOTIFY_PORT), H)
-        except OSError as e:
-            st["erro"] = "A porta %d esta ocupada (%s). Feche o outro programa ou outra copia do NEXUS." % (SPOTIFY_PORT, e)
-            return False
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        st["server"] = srv
-        return True
-
-    def spotify_info(self):
-        st = self._sp_st()
-        cfg = self._sp_cfg()
-        conectado = bool(self._sp_refresh_get())
-        faltam = set(SPOTIFY_SCOPES.split()) - set(str(cfg.get("scope", "")).split())
-        out = {"clientId": bool(cfg.get("client_id")), "connected": conectado, "redirect": SPOTIFY_REDIRECT,
-               "erro": st["erro"], "playerUrl": None,
-               "reauth": bool(conectado and faltam)}      # login antigo, sem permissao de editar playlists
-        if conectado and self._sp_servidor():
-            out["playerUrl"] = "http://127.0.0.1:%d/player?n=%s" % (SPOTIFY_PORT, st["nonce"])
-            out["erro"] = st["erro"]
-        return out
-
-    def spotify_salvar_client(self, client_id):
-        import re
-        cid = str(client_id or "").strip().lower()
-        if not re.fullmatch(r"[0-9a-f]{32}", cid):
-            return {"status": "error", "message": "O Client ID tem 32 caracteres (letras a-f e numeros)."}
-        cfg = self._sp_cfg()
-        if cfg.get("client_id") != cid:
-            self._sp_limpar_sessao()
-        cfg["client_id"] = cid
-        try:
-            self._sp_cfg_save()
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-        return {"status": "success"}
-
-    def spotify_conectar(self):
-        """Inicia o login (OAuth PKCE) no navegador padrao."""
-        try:
-            import base64
-            import urllib.parse
-            cid = self._sp_cfg().get("client_id", "")
-            if not cid:
-                return {"status": "error", "message": "Informe o Client ID primeiro."}
-            if not self._sp_servidor():
-                return {"status": "error", "message": self._sp_st()["erro"] or "Servidor local indisponivel."}
-            verifier = base64.urlsafe_b64encode(os.urandom(64)).decode().rstrip("=")
-            challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-            state = base64.urlsafe_b64encode(os.urandom(16)).decode().rstrip("=")
-            self._sp_st()["auth"] = {"verifier": verifier, "state": state, "t": time.time()}
-            url = "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode({
-                "client_id": cid, "response_type": "code", "redirect_uri": SPOTIFY_REDIRECT,
-                "scope": SPOTIFY_SCOPES, "code_challenge_method": "S256",
-                "code_challenge": challenge, "state": state})
-            import webbrowser
-            webbrowser.open(url)
-            return {"status": "success", "url": url}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-
-    def spotify_desconectar(self):
-        self._sp_limpar_sessao()
-        return {"status": "success"}
-
-    def spotify_api(self, method, path, body=None):
-        """Proxy da Web API do Spotify: o token nunca chega a interface."""
-        import re
-        try:
-            method = str(method or "").upper()
-            path = str(path or "")
-            if method not in ("GET", "PUT", "POST"):
-                return {"status": 0, "message": "Metodo nao permitido."}
-            if not re.fullmatch(r"/v1/[A-Za-z0-9_\-/.:%=&?,+~]*", path) or ".." in path:
-                return {"status": 0, "message": "Caminho nao permitido."}
-            tok = self._sp_access()
-            if not tok:
-                return {"status": 401, "data": None, "message": "Nao conectado."}
-            headers = {"Authorization": "Bearer " + tok}
-            dados = None
-            if body is not None:
-                dados = json.dumps(body)
-                headers["Content-Type"] = "application/json"
-            status, raw, hdr = self._sp_http(method, "https://api.spotify.com" + path, dados, headers)
-            parsed = None
-            if raw:
-                try:
-                    parsed = json.loads(raw.decode("utf-8", "replace"))
-                except Exception:
-                    parsed = None
-            out = {"status": status, "data": parsed}
-            if status == 429:
-                out["retry"] = hdr.get("Retry-After")
-            return out
-        except Exception as e:
-            return {"status": 0, "message": str(e)}
-
-    def _spotify_encerrar(self):
-        st = self._sp_st()
-        srv, st["server"] = st["server"], None
-        if srv:
-            threading.Thread(target=srv.shutdown, daemon=True).start()
-
     def get_db_path(self):
         return self.data_file
+
+    # ------------------------------------------------------------------ #
+    # Captura rapida (Ctrl+Alt+N em qualquer lugar do Windows)
+    # ------------------------------------------------------------------ #
+    _qc_win = None
+    _qc_status = "iniciando"
+
+    def _qc_abrir(self):
+        w = self._qc_win
+        if not w:
+            return
+        try:
+            w.show()
+            try:
+                import ctypes
+                h = int(w.native.Handle.ToInt64())
+                ctypes.windll.user32.ShowWindow(h, 9)
+                ctypes.windll.user32.SetForegroundWindow(h)
+            except Exception:
+                pass
+            # Sem foco no controle WebView2 o teclado (Enter/Esc) nao chega a pagina.
+            try:
+                from System import Action
+                f = w.native
+                f.Invoke(Action(lambda: (f.Activate(), f.webview.Focus())))
+            except Exception:
+                pass
+            w.evaluate_js("window.nxQcReset && nxQcReset()")
+        except Exception as e:
+            print(f"[NEXUS] Falha ao abrir a captura rapida: {e}")
+
+    def quick_capture_hide(self):
+        try:
+            if self._qc_win:
+                self._qc_win.hide()
+        except Exception:
+            pass
+        return True
+
+    def quick_capture_status(self):
+        return {"status": self._qc_status, "atalho": "Ctrl+Alt+N"}
+
+    def quick_capture_add(self, texto):
+        """A tarefa nasce no estado da janela principal (e la que mora o banco)."""
+        try:
+            texto = str(texto or "").strip()[:300]
+            if not texto or not self._window:
+                return {"ok": False, "msg": "Digite o texto da tarefa."}
+            r = self._window.evaluate_js("nxQuickAdd(%s)" % json.dumps(texto))
+            if not r:
+                return {"ok": False, "msg": "O NEXUS ainda esta carregando. Tente de novo."}
+            return {"ok": True, "msg": str(r)}
+        except Exception as e:
+            return {"ok": False, "msg": f"Erro: {e}"}
 
     def get_app_version(self):
         return APP_VERSION
@@ -2580,6 +2250,73 @@ def _escrever_ui_local(nome_arquivo, html_str):
     raise ultimo_erro
 
 
+QC_HTML = r"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>NEXUS - Captura rapida</title>
+<link rel="stylesheet" href="__VENDOR__/fonts/google-sans-flex.css">
+<link rel="stylesheet" href="__VENDOR__/fontawesome/css/all.min.css">
+<style>
+  html, body { margin:0; height:100%; background:#0a0a0a; color:#d3d3d3; font-family:'Google Sans Flex','Segoe UI',sans-serif; overflow:hidden; user-select:none; }
+  .box { box-sizing:border-box; height:100%; border:1px solid #262626; border-radius:10px; padding:12px 14px 10px; display:flex; flex-direction:column; gap:8px; }
+  .top { display:flex; align-items:center; gap:10px; }
+  .ico { color:#6b7280; font-size:13px; width:16px; text-align:center; }
+  input { flex:1; background:#050505; border:1px solid #262626; border-radius:8px; padding:9px 12px; color:#e5e5e5; font-size:14px; outline:none; font-family:inherit; }
+  input::placeholder { color:#5a5a5e; }
+  input:focus { border-color:#4272c4; }
+  .hint { font-size:11px; color:#6b7280; padding-left:26px; }
+  .hint b { color:#9ca3af; font-weight:600; }
+  .ok { color:#9ca3af; }
+  .ok::before { content:'\f00c'; font-family:'Font Awesome 6 Free'; font-weight:900; color:#4272c4; margin-right:6px; }
+  .err { color:#fb7185; }
+</style></head>
+<body><div class="box">
+  <div class="top"><i class="ico fa-solid fa-plus"></i><input id="q" placeholder="Nova tarefa... ex: Ligar para o dentista amanhã #pessoal !alta" maxlength="300" autocomplete="off" spellcheck="false"></div>
+  <div class="hint" id="h"><b>Enter</b> cria · <b>Esc</b> fecha · datas: hoje, amanhã, sexta, 25/11 · <b>#projeto</b> · <b>!alta</b> · toda segunda</div>
+</div>
+<script>
+  const q = document.getElementById('q'), h = document.getElementById('h');
+  const dica = h.innerHTML;
+  function api() { return window.pywebview && window.pywebview.api; }
+  window.nxQcReset = function () { q.value = ''; h.className = 'hint'; h.innerHTML = dica; setTimeout(() => q.focus(), 30); };
+  q.addEventListener('keydown', async e => {
+    if (e.key === 'Escape') { e.preventDefault(); api() && api().quick_capture_hide(); }
+    if (e.key !== 'Enter' || !q.value.trim()) return;
+    e.preventDefault();
+    const texto = q.value; q.value = '';
+    try {
+      const r = await api().quick_capture_add(texto);
+      h.className = 'hint ' + (r && r.ok ? 'ok' : 'err');
+      h.textContent = (r && r.msg) || 'Nao foi possivel criar a tarefa.';
+      if (r && r.ok) setTimeout(() => api().quick_capture_hide(), 1100);
+    } catch (err) { h.className = 'hint err'; h.textContent = 'Erro: ' + err; }
+  });
+  window.addEventListener('blur', () => { setTimeout(() => { if (!document.hasFocus()) api() && api().quick_capture_hide(); }, 150); });
+  window.addEventListener('pywebviewready', () => q.focus());
+</script></body></html>"""
+
+
+def _iniciar_atalho_global(api):
+    """Registra Ctrl+Alt+N no Windows inteiro. A thread tem o proprio loop de
+    mensagens: RegisterHotKey entrega WM_HOTKEY na fila da thread que registrou."""
+    def loop():
+        try:
+            import ctypes
+            from ctypes import wintypes
+            u32 = ctypes.windll.user32
+            MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_N, WM_HOTKEY = 0x1, 0x2, 0x4000, 0x4E, 0x0312
+            if not u32.RegisterHotKey(None, 1, MOD_ALT | MOD_CONTROL | MOD_NOREPEAT, VK_N):
+                api._qc_status = "indisponivel"
+                return
+            api._qc_status = "ok"
+            msg = wintypes.MSG()
+            while u32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == WM_HOTKEY:
+                    threading.Thread(target=api._qc_abrir, daemon=True).start()
+        except Exception as e:
+            api._qc_status = "erro"
+            print(f"[NEXUS] Atalho global indisponivel: {e}")
+    threading.Thread(target=loop, daemon=True).start()
+
+
 HTML_CONTENT = r"""<!DOCTYPE html>
 <html lang="pt-BR" class="dark h-full">
 <head>
@@ -2606,12 +2343,11 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         script-src 'self' file: 'unsafe-inline' 'unsafe-eval';
         style-src 'self' file: 'unsafe-inline';
         font-src 'self' file: data:;
-        img-src 'self' data: blob: https://*.scdn.co https://*.spotifycdn.com;
+        img-src 'self' data: blob:;
         connect-src 'self' https://cogni-data-default-rtdb.firebaseio.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com;
         object-src 'none';
         base-uri 'none';
         form-action 'none';
-        frame-src http://127.0.0.1:8898;
     ">
 
     <!-- Tailwind pre-compilado, Font Awesome e fontes: tudo local, em vendor\.
@@ -2892,81 +2628,278 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         .note-editor pre code { background: transparent; border: 0; padding: 0; font-size: inherit; border-radius: 0; }
 
 
-        /* ---- Painel Spotify (player proprio) + barra de aplicativos ---- */
-        .sp-panel { position: relative; width: 380px; flex-shrink: 0; display: flex; flex-direction: column; min-height: 0; background: #0a0a0a; border-left: 1px solid #262626; z-index: 15; }
-        .sp-panel.hidden { display: none; }
-        .sp-resize { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 30; }
-        .sp-resize:hover, .sp-resize.drag { background: rgba(66,114,196,.45); }
-        .sp-head { height: 40px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-bottom: 1px solid #262626; font-size: 12px; font-weight: 700; color: #e5e5e5; flex-shrink: 0; }
-        .sp-title i { margin-right: 6px; color: #9ca3af; }
-        .sp-sub { font-size: 10px; color: #8a8a8e; font-weight: 600; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .sp-acts { display: flex; gap: 2px; }
-        .sp-acts button { width: 26px; height: 26px; border-radius: 6px; color: #9ca3af; font-size: 11px; cursor: pointer; }
-        .sp-acts button:hover { background: rgba(255,255,255,.08); color: #fff; }
-        .sp-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-        .sp-card { padding: 16px; font-size: 12px; color: #d1d5db; overflow-y: auto; line-height: 1.5; }
-        .sp-card h3 { font-size: 13px; font-weight: 700; color: #fff; margin-bottom: 4px; }
-        .sp-card a { color: #7ca3e6; text-decoration: underline; cursor: pointer; }
-        .sp-steps { margin: 10px 0 12px 18px; list-style: decimal; display: flex; flex-direction: column; gap: 6px; color: #9ca3af; }
-        .sp-code { display: block; margin-top: 4px; padding: 6px 8px; background: #111; border: 1px solid #262626; border-radius: 6px; font-family: Consolas, monospace; font-size: 11px; color: #e5e7eb; user-select: text; word-break: break-all; }
-        .sp-input { width: 100%; background: #111; border: 1px solid #262626; border-radius: 8px; padding: 8px 10px; color: #e5e7eb; font-size: 12px; outline: none; user-select: text; }
-        .sp-input:focus { border-color: #4272c4; }
-        .sp-btn { margin-top: 10px; width: 100%; background: #4272c4; color: #fff; font-weight: 700; font-size: 12px; padding: 8px; border-radius: 8px; cursor: pointer; transition: background .15s; }
-        .sp-btn:hover { background: #3b82f6; }
-        .sp-btn.ghost { background: rgba(255,255,255,.06); color: #d1d5db; }
-        .sp-btn.ghost:hover { background: rgba(255,255,255,.12); }
-        .sp-note { margin-top: 10px; font-size: 11px; color: #8a8a8e; line-height: 1.5; }
-        .sp-err { margin-top: 10px; padding: 7px 10px; border-radius: 8px; background: rgba(239,68,68,.1); color: #fca5a5; font-size: 11px; line-height: 1.4; }
-        .sp-tabs { display: flex; gap: 6px; padding: 10px 12px 0; flex-shrink: 0; }
-        .sp-tabs button { flex: 1; padding: 6px; border-radius: 8px; font-size: 12px; font-weight: 700; color: #9ca3af; background: rgba(255,255,255,.04); cursor: pointer; }
-        .sp-tabs button.on { background: rgba(66,114,196,.25); color: #fff; }
-        .sp-aviso { margin: 8px 12px 0; padding: 7px 10px; border-radius: 8px; background: rgba(239,68,68,.1); color: #fca5a5; font-size: 11px; line-height: 1.4; flex-shrink: 0; }
-        .sp-picker { position: absolute; inset: 0; z-index: 40; background: rgba(0,0,0,.6); display: flex; align-items: flex-end; }
-        .sp-picker.hidden { display: none; }
-        .sp-pick { width: 100%; max-height: 75%; overflow-y: auto; background: #0f0f0f; border-top: 1px solid #262626; border-radius: 14px 14px 0 0; padding: 10px 10px 14px; }
-        .sp-badge { display: inline-block; font-size: 9px; font-weight: 700; color: #93b4ea; background: rgba(66,114,196,.2); border-radius: 999px; padding: 1px 6px; margin-right: 5px; }
-        .sp-r-b + .sp-r-b { margin-left: -4px; }
-        .sp-reauth { margin: 8px 12px 0; padding: 8px 10px; border-radius: 8px; background: rgba(66,114,196,.15); color: #93b4ea; font-size: 11px; line-height: 1.4; flex-shrink: 0; }
-        .sp-reauth a { color: #fff; text-decoration: underline; cursor: pointer; font-weight: 700; }
-        .sp-aviso.ok { background: rgba(66,114,196,.15); color: #93b4ea; }
-        .sp-aviso:empty { display: none; }
-        .sp-lista { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 8px 10px; }
-        .sp-sec { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #8a8a8e; padding: 10px 6px 4px; }
-        .sp-row { display: flex; align-items: center; gap: 10px; padding: 6px; border-radius: 8px; cursor: pointer; }
-        .sp-row:hover { background: rgba(255,255,255,.06); }
-        .sp-row.tocando .sp-r-n { color: #7ca3e6; }
-        .sp-cover { width: 40px; height: 40px; border-radius: 6px; object-fit: cover; background: #1a1a1a; flex-shrink: 0; }
-        .sp-r-t { flex: 1; min-width: 0; }
-        .sp-r-n { font-size: 12px; font-weight: 600; color: #f3f4f6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .sp-r-s { font-size: 11px; color: #8a8a8e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .sp-r-b { width: 28px; height: 28px; border-radius: 50%; color: #d1d5db; font-size: 11px; flex-shrink: 0; opacity: 0; cursor: pointer; }
-        .sp-row:hover .sp-r-b { opacity: 1; }
-        .sp-r-b:hover { background: rgba(255,255,255,.12); color: #fff; }
-        .sp-voltar { display: flex; align-items: center; gap: 8px; padding: 4px 6px 8px; font-size: 12px; font-weight: 700; color: #e5e5e5; }
-        .sp-voltar button { width: 26px; height: 26px; border-radius: 6px; color: #9ca3af; cursor: pointer; flex-shrink: 0; }
-        .sp-voltar button:hover { background: rgba(255,255,255,.08); color: #fff; }
-        .sp-voltar button.sp-smart { color: #7ca3e6; }
-        .sp-voltar span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .sp-now { border-top: 1px solid #262626; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; background: #0d0d0d; flex-shrink: 0; }
-        .sp-now.hidden { display: none; }
-        .sp-np { display: flex; align-items: center; gap: 10px; }
-        .sp-ctrl { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
-        .sp-ctrl button { width: 28px; height: 28px; border-radius: 50%; color: #d1d5db; font-size: 12px; cursor: pointer; }
-        .sp-ctrl button:hover { background: rgba(255,255,255,.1); color: #fff; }
-        .sp-ctrl button.on { color: #7ca3e6; background: rgba(66,114,196,.22); }
-        .sp-ctrl .sp-pp { width: 34px; height: 34px; background: #fff; color: #000; font-size: 13px; }
-        .sp-ctrl .sp-pp:hover { background: #e5e5e5; color: #000; }
-        .sp-seek, .sp-vol { display: flex; align-items: center; gap: 8px; font-size: 10px; color: #8a8a8e; font-variant-numeric: tabular-nums; }
-        .sp-seek input, .sp-vol input { flex: 1; accent-color: #4272c4; height: 4px; cursor: pointer; }
-        .sp-vol { gap: 8px; }
-        .sp-vol i { width: 14px; text-align: center; }
-        .sp-frame { position: fixed; left: -10px; top: -10px; width: 1px; height: 1px; border: 0; opacity: 0; pointer-events: none; }
-        .nx-apprail { width: 46px; flex-shrink: 0; background: #0a0a0a; border-left: 1px solid #262626; display: flex; flex-direction: column; align-items: center; padding-top: 10px; gap: 8px; z-index: 20; }
-        .nx-apprail button { position: relative; width: 34px; height: 34px; border-radius: 50%; color: #9ca3af; font-size: 16px; cursor: pointer; transition: background .15s, color .15s; }
+        /* ---- Barra de aplicativos (direita) + painel lateral ---- */
+        .nx-apprail { width: 48px; flex-shrink: 0; background: #0a0a0a; border-left: 1px solid #262626; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 0; z-index: 25; }
+        .nx-rail-grp { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+        .nx-rail-grp.hidden { display: none; }
+        .nx-rail-sep { width: 22px; height: 1px; background: #262626; margin: 4px 0; }
+        .nx-apprail button { position: relative; width: 36px; height: 36px; border-radius: 50%; color: #9ca3af; font-size: 15px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s, color .15s; }
         .nx-apprail button:hover { background: rgba(255,255,255,.08); color: #fff; }
         .nx-apprail button.on { background: rgba(66,114,196,.25); color: #fff; box-shadow: inset 0 0 0 1px rgba(66,114,196,.55); }
-        .nx-apprail button::after { content: attr(data-tip); position: absolute; right: calc(100% + 8px); top: 50%; transform: translateY(-50%); background: #1f2937; color: #fff; font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 6px; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity .12s; }
+        .nx-apprail button::after { content: attr(data-tip); position: absolute; right: calc(100% + 8px); top: 50%; transform: translateY(-50%); background: #1f1f1f; border: 1px solid #333; color: #fff; font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 6px; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity .12s; z-index: 50; }
         .nx-apprail button:hover::after { opacity: 1; }
+        .nx-rbc { position: absolute; top: -2px; right: -2px; min-width: 15px; height: 15px; border-radius: 999px; background: #4272c4; color: #fff; font-size: 9px; line-height: 15px; text-align: center; padding: 0 4px; font-style: normal; }
+        .nx-rbc:empty, .nx-rbc[data-z="1"] { display: none; }
+        .nx-sidepanel { position: fixed; right: 58px; top: 56px; width: 340px; max-width: calc(100vw - 80px); max-height: calc(100vh - 72px); background: #101010; border: 1px solid #2a2a2a; border-radius: 12px; box-shadow: 0 14px 40px rgba(0,0,0,.65); display: flex; flex-direction: column; z-index: 190; animation: nxToastIn .25s cubic-bezier(.2,.8,.2,1) both; }
+        .nx-sidepanel.hidden { display: none; }
+        .nx-sp-head { height: 42px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 14px; border-bottom: 1px solid #222; font-size: 13px; font-weight: 700; color: #fff; }
+        .nx-sp-head button { color: #6b7280; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+        .nx-sp-head button:hover { color: #fff; background: rgba(255,255,255,.08); }
+        .nx-sp-body { overflow-y: auto; padding: 12px 14px 14px; min-height: 0; }
+        .nx-sec { display: none; flex-direction: column; gap: 10px; }
+        .nx-sec.on { display: flex; }
+        .nx-lbl { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #6b7280; margin-top: 4px; }
+        .nx-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
+        .nx-grid button { height: 34px; border-radius: 7px; background: #141414; border: 1px solid #222; color: #d3d3d3; cursor: pointer; font-size: 13px; }
+        .nx-grid button:hover { background: #1f1f1f; color: #fff; border-color: #333; }
+        .nx-cores { display: flex; gap: 8px; flex-wrap: wrap; }
+        .nx-cores button { width: 26px; height: 26px; border-radius: 50%; border: 2px solid #262626; cursor: pointer; }
+        .nx-cores button:hover { border-color: #fff; }
+        .nx-cor-off { background: transparent; color: #6b7280; font-size: 11px; }
+        .nx-wide { display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; padding: 7px 10px; border-radius: 8px; background: #141414; border: 1px solid #262626; color: #d3d3d3; font-size: 12px; font-weight: 600; cursor: pointer; }
+        .nx-wide:hover { background: #1c1c1c; color: #fff; border-color: #3a3a3a; }
+        .nx-primary { background: #4272c4; border-color: #4272c4; color: #fff; }
+        .nx-primary:hover { background: #5282d4; border-color: #5282d4; }
+        .nx-danger { color: #fb7185; }
+        .nx-row2 { display: flex; gap: 6px; }
+        .nx-row2 > * { flex: 1; min-width: 0; }
+        .nx-in { width: 100%; background: #050505; border: 1px solid #262626; border-radius: 7px; padding: 6px 9px; color: #e5e5e5; font-size: 12px; outline: none; }
+        .nx-in:focus { border-color: #4272c4; }
+        .nx-tip { font-size: 11px; color: #7c7c80; line-height: 1.55; }
+        .nx-tip b { color: #b5b5b9; }
+        .nx-empty { font-size: 12px; color: #6b7280; font-style: italic; padding: 4px 2px; }
+        .nx-empty.hidden { display: none; }
+        .nx-list { display: flex; flex-direction: column; gap: 4px; }
+        .nx-item { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 8px; background: #101010; border: 1px solid #1f1f1f; cursor: pointer; font-size: 12px; color: #d3d3d3; }
+        .nx-item:hover { border-color: #333; background: #151515; }
+        .nx-item i { color: #7aa7f0; width: 14px; text-align: center; flex-shrink: 0; }
+        .nx-item .t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+        .nx-item .s { font-size: 10px; color: #7c7c80; display: block; margin-top: 1px; }
+        .nx-item.done .t { text-decoration: line-through; color: #6b7280; }
+        .nx-item .acts { display: flex; gap: 4px; flex-shrink: 0; }
+        .nx-item .acts button { font-size: 11px; padding: 3px 8px; border-radius: 6px; background: #1a1a1a; border: 1px solid #2a2a2a; color: #d3d3d3; cursor: pointer; }
+        .nx-item .acts button:hover { color: #fff; border-color: #4272c4; }
+        .nx-item .acts button.del:hover { border-color: #fb7185; color: #fb7185; }
+        .nx-tpl-form { display: flex; flex-direction: column; gap: 6px; padding: 8px; margin-top: -2px; border: 1px dashed #2a2a2a; border-radius: 8px; }
+        .nx-tpl-ed { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid #262626; border-radius: 10px; background: #0c0c0c; }
+        .nx-seg { display: flex; gap: 4px; padding: 3px; background: #050505; border: 1px solid #222; border-radius: 8px; }
+        .nx-seg button { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 5px 8px; border-radius: 6px; border: 0; background: transparent; color: #8b8b90; font-size: 12px; font-weight: 600; cursor: pointer; }
+        .nx-seg button:hover { color: #fff; }
+        .nx-seg button.on { background: #1c1c1c; color: #fff; }
+        .nx-tpl-rows { display: flex; flex-direction: column; gap: 6px; }
+        .nx-tpl-row { display: flex; flex-direction: column; gap: 5px; padding: 7px; border: 1px solid #1f1f1f; border-radius: 8px; background: #101010; }
+        .nx-tpl-meta { display: flex; gap: 6px; align-items: center; }
+        .nx-tpl-meta label { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #7c7c80; flex-shrink: 0; }
+        .nx-tpl-meta label .nx-in { width: 58px; }
+        .nx-tpl-meta select { flex: 1; min-width: 0; }
+        .nx-tpl-meta .del { flex-shrink: 0; width: 28px; height: 28px; border-radius: 7px; background: #141414; border: 1px solid #262626; color: #8b8b90; cursor: pointer; }
+        .nx-tpl-meta .del:hover { color: #fb7185; border-color: #fb7185; }
+        .nx-tpl-steps { font-size: 11px !important; }
+        .nx-chk { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #b5b5b9; cursor: pointer; }
+        .nx-chk input { accent-color: #4272c4; }
+        textarea.nx-in { resize: vertical; line-height: 1.5; font-family: inherit; }
+        .nx-chips { display: flex; flex-wrap: wrap; gap: 5px; min-height: 4px; }
+        .nx-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: rgba(66,114,196,.14); border: 1px solid rgba(66,114,196,.3); color: #a9c6f7; }
+        /* ---- Central de prazos (popup) ---- */
+        .nx-notif { position: fixed; top: 52px; right: 120px; width: 340px; max-width: calc(100vw - 24px); max-height: calc(100vh - 70px); background: #101010; border: 1px solid #2a2a2a; border-radius: 12px; box-shadow: 0 14px 40px rgba(0,0,0,.65); z-index: 200; display: flex; flex-direction: column; animation: nxToastIn .22s cubic-bezier(.2,.8,.2,1) both; }
+        .nx-notif.hidden { display: none; }
+        .nx-notif-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px 10px; font-size: 13px; font-weight: 700; color: #fff; }
+        .nx-notif-count { color: #7aa7f0; font-weight: 700; font-size: 13px; }
+        .nx-notif-list { overflow-y: auto; padding: 0 8px 8px; display: flex; flex-direction: column; gap: 2px; min-height: 0; }
+        .nx-ni { display: flex; align-items: flex-start; gap: 11px; padding: 9px 10px; border-radius: 9px; cursor: pointer; }
+        .nx-ni:hover { background: #181818; }
+        .nx-ni.atr { background: rgba(244,63,94,.10); }
+        .nx-ni.atr:hover { background: rgba(244,63,94,.17); }
+        .nx-ni .ic { width: 16px; text-align: center; margin-top: 2px; font-size: 14px; flex-shrink: 0; }
+        .nx-ni.atr .ic { color: #f43f5e; }
+        .nx-ni.hoje .ic { color: #f59e0b; }
+        .nx-ni.prox .ic { color: #60a5fa; }
+        .nx-ni .tx { flex: 1; min-width: 0; }
+        .nx-ni .tt { font-size: 13px; color: #e5e5e5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .nx-ni .st { font-size: 11px; color: #8b8b90; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .nx-ni.atr .st { color: #fda4af; }
+        .nx-ni .ck { opacity: 0; flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%; border: 1px solid #3a3a3a; background: transparent; color: #9ca3af; font-size: 9px; cursor: pointer; transition: opacity .15s; }
+        .nx-ni:hover .ck { opacity: 1; }
+        .nx-ni .ck:hover { border-color: #10b981; color: #10b981; }
+        .nx-notif-empty { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 22px 10px 26px; font-size: 12px; color: #6b7280; text-align: center; }
+        .nx-notif-empty i { font-size: 20px; color: rgba(52,211,153,.6); margin-bottom: 4px; }
+        .nx-notif-empty b { color: #d3d3d3; font-weight: 600; }
+        .nx-notif-foot { display: flex; justify-content: space-between; border-top: 1px solid #1f1f1f; padding: 6px 8px; }
+        .nx-notif-foot button { font-size: 11px; color: #8b8b90; background: none; border: 0; padding: 5px 8px; border-radius: 6px; cursor: pointer; display: flex; gap: 6px; align-items: center; }
+        .nx-notif-foot button:hover { color: #fff; background: #181818; }
+
+        /* ---- Detalhes da tarefa ---- */
+        .nx-dt { background: #0a0a0a; border-left: 1px solid #1f1f1f; }
+        .nx-dt select option { background: #0f0f0f; color: #e5e5e5; }
+        .nx-dt-top { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px 4px; }
+        .nx-dt-kicker { font-size: 11px; color: #8b8b90; display: flex; gap: 7px; align-items: center; }
+        .nx-dt-kicker i { color: #7aa7f0; }
+        .nx-dt-x { color: #6b7280; background: none; border: 0; cursor: pointer; padding: 5px 7px; border-radius: 6px; }
+        .nx-dt-x:hover { color: #fff; background: #181818; }
+        .nx-dt-body { padding: 4px 16px 16px; font-size: 12px; }
+        .nx-dt-title { width: 100%; background: transparent; border: 1px solid transparent; border-radius: 6px; resize: none; overflow: hidden; font-size: 19px; font-weight: 700; color: #fff; line-height: 1.3; outline: none; padding: 2px 4px; margin: 0 -4px 6px; font-family: inherit; display: block; }
+        .nx-dt-title:focus { border-color: #262626; background: #0f0f0f; }
+        .nx-dt-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; }
+        .nx-dt-row .k { display: flex; align-items: center; gap: 10px; color: #8b8b90; flex-shrink: 0; }
+        .nx-dt-row .k i { width: 14px; text-align: center; color: #6b7280; }
+        .nx-dt-row .v { min-width: 0; display: flex; justify-content: flex-end; align-items: center; }
+        .nx-dt-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 3px 2px 9px; border-radius: 6px; border: 1px solid #262626; background: #141414; color: #d3d3d3; max-width: 100%; }
+        .nx-dt-chip select { background: transparent; border: 0; color: inherit; font-size: 12px; outline: none; cursor: pointer; max-width: 170px; text-overflow: ellipsis; font-family: inherit; padding: 1px 0; }
+        .nx-dt-chip .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+        .nx-dt-chip.proj { background: rgba(66,114,196,.12); border-color: rgba(66,114,196,.32); color: #a9c6f7; }
+        .nx-dt-chip.proj.vazio { background: #141414; border-color: #262626; color: #8b8b90; }
+        .nx-dt-chip.proj.vazio .dot { display: none; }
+        .nx-dt-chip.cat { background: rgba(245,158,11,.12); border-color: rgba(245,158,11,.32); color: #fbbf24; }
+        .nx-dt-chip.prio[data-p="Urgente"] { background: rgba(244,63,94,.12); border-color: rgba(244,63,94,.32); color: #fb7185; }
+        .nx-dt-chip.prio[data-p="Alta"] { background: rgba(245,158,11,.12); border-color: rgba(245,158,11,.32); color: #fbbf24; }
+        .nx-dt-chip.prio[data-p="Média"] { background: rgba(56,189,248,.10); border-color: rgba(56,189,248,.28); color: #7dd3fc; }
+        .nx-dt-date { background: transparent; border: 1px solid transparent; border-radius: 6px; color: #d3d3d3; font-size: 12px; padding: 2px 6px; color-scheme: dark; outline: none; font-family: inherit; }
+        .nx-dt-date:hover, .nx-dt-date:focus { border-color: #262626; }
+        .nx-dt-date.atr, .nx-dt-date.hoje { color: #f87171; font-weight: 600; }
+        .nx-dt-date.amanha { color: #fbbf24; }
+        .nx-dt-sel { background: #141414; border: 1px solid #262626; border-radius: 6px; color: #d3d3d3; font-size: 12px; padding: 3px 6px; outline: none; cursor: pointer; font-family: inherit; }
+        .nx-dt .nx-rec-row { justify-content: flex-end; }
+        .nx-dt-myday { display: inline-flex; align-items: center; gap: 7px; padding: 3px 9px; border-radius: 6px; border: 1px solid #262626; background: #141414; cursor: pointer; }
+        .nx-dt-myday:hover { border-color: rgba(245,158,11,.45); }
+        .nx-dt-myday #detailMyDayLabel { display: none; }
+        .nx-dt-sec { border-top: 1px solid #1a1a1a; padding-top: 8px; margin-top: 10px; }
+        .nx-dt-pct { color: #fff; font-weight: 700; font-size: 12px; }
+        .nx-dt-mute { color: #8b8b90; font-size: 12px; }
+        .nx-dt-range { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 999px; margin: 4px 0 6px; cursor: pointer; background: linear-gradient(90deg, #4272c4, #8b5cf6) 0 0 / var(--p, 0%) 100% no-repeat, #1f1f1f; }
+        .nx-dt-range::-webkit-slider-thumb { -webkit-appearance: none; width: 13px; height: 13px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 3px rgba(66,114,196,.35); opacity: 0; transition: opacity .15s; }
+        .nx-dt-range:hover::-webkit-slider-thumb, .nx-dt-range:active::-webkit-slider-thumb { opacity: 1; }
+        .nx-dt-steps { display: flex; flex-direction: column; }
+        .nx-dt-step { display: flex; align-items: flex-start; gap: 10px; padding: 4px 0; }
+        .nx-dt-step .cb { width: 16px; height: 16px; margin-top: 3px; border-radius: 4px; border: 1.5px solid #4b5563; display: flex; align-items: center; justify-content: center; font-size: 9px; color: #fff; flex-shrink: 0; cursor: pointer; background: transparent; transition: background .15s, border-color .15s; }
+        .nx-dt-step .cb:hover { border-color: #7aa7f0; }
+        .nx-dt-step.ok .cb { background: #4272c4; border-color: #4272c4; }
+        .nx-dt-step textarea { flex: 1; min-width: 0; resize: none; overflow: hidden; background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 1px 4px; color: #e5e5e5; font-size: 13px; line-height: 1.45; outline: none; font-family: inherit; }
+        .nx-dt-step textarea:hover { border-color: #1f1f1f; }
+        .nx-dt-step textarea:focus { border-color: #2a2a2a; background: #111; }
+        .nx-dt-step.ok textarea { text-decoration: line-through; color: #6b7280; }
+        .nx-dt-step .rm { opacity: 0; color: #6b7280; background: none; border: 0; cursor: pointer; padding: 3px 4px; margin-top: 1px; }
+        .nx-dt-step:hover .rm { opacity: 1; }
+        .nx-dt-step .rm:hover { color: #fb7185; }
+        .nx-dt-add, .nx-vt-add { display: flex; align-items: center; gap: 9px; padding: 8px 11px; border: 1px solid #262626; border-radius: 9px; background: #0d0d0d; }
+        .nx-dt-add { margin-top: 6px; }
+        .nx-dt-add:focus-within, .nx-vt-add:focus-within { border-color: #4272c4; }
+        .nx-dt-add i, .nx-vt-add i { color: #8b8b90; font-size: 11px; }
+        .nx-dt-add input, .nx-vt-add input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #e5e5e5; font-size: 13px; font-family: inherit; }
+        .nx-dt-add input::placeholder, .nx-vt-add input::placeholder { color: #6b7280; }
+        .nx-dt-link { font-size: 11px; color: #7aa7f0; background: none; border: 0; cursor: pointer; display: flex; align-items: center; gap: 5px; padding: 4px 6px; border-radius: 6px; }
+        .nx-dt-link:hover { color: #fff; background: #181818; }
+        .nx-dt-notes { display: flex; gap: 10px; align-items: flex-start; }
+        .nx-dt-notes > i { color: #6b7280; margin-top: 4px; width: 14px; text-align: center; }
+        .nx-dt-notes textarea { flex: 1; background: transparent; border: 1px solid transparent; border-radius: 6px; outline: none; resize: none; overflow: hidden; color: #d3d3d3; font-size: 12px; line-height: 1.55; min-height: 44px; padding: 2px 4px; font-family: inherit; }
+        .nx-dt-notes textarea:focus { border-color: #262626; background: #0f0f0f; }
+        .nx-dt-notes textarea::placeholder { color: #6b7280; }
+        .nx-dt-foot { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #1a1a1a; padding-top: 10px; margin-top: 12px; }
+        .nx-dt-foot button { font-size: 11px; color: #fb7185; background: none; border: 0; cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 5px 7px; border-radius: 6px; }
+        .nx-dt-foot button:hover { background: rgba(244,63,94,.1); }
+
+        /* ---- Tarefas ao lado do Vault ---- */
+        .nx-vt { flex: 0 0 42%; min-width: 290px; max-width: 560px; flex-direction: column; background: #050505; border-left: 1px solid #1f1f1f; min-height: 0; animation: nxIn .2s ease both; }
+        .nx-vt-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 18px 16px 12px 20px; }
+        .nx-vt-tt { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+        .nx-vt-tt > span { font-size: 20px; font-weight: 700; color: #fff; }
+        .nx-vt-tt select, .nx-dt-chip select { field-sizing: content; }
+        .nx-vt-tt select { background: transparent; border: 0; color: #8b8b90; font-size: 12px; outline: none; cursor: pointer; max-width: 210px; min-width: 0; text-overflow: ellipsis; font-family: inherit; }
+        .nx-vt-tt select:hover { color: #fff; }
+        .nx-vt-tt select option { background: #0f0f0f; color: #e5e5e5; }
+        .nx-vt-head button { color: #6b7280; background: none; border: 0; cursor: pointer; padding: 6px 8px; border-radius: 6px; }
+        .nx-vt-head button:hover { color: #fff; background: #151515; }
+        .nx-vt-add { margin: 0 16px 6px 20px; }
+        .nx-vt-list { flex: 1; overflow-y: auto; padding: 0 12px 10px 14px; min-height: 0; }
+        .nx-vt-row { display: flex; align-items: flex-start; gap: 12px; padding: 11px 8px; border-bottom: 1px solid #151515; border-radius: 6px; }
+        .nx-vt-row:hover { background: #0e0e0e; }
+        .nx-vt-ck { width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid #4b5563; margin-top: 1px; flex-shrink: 0; background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 9px; transition: border-color .15s, background .15s; }
+        .nx-vt-ck:hover { border-color: #7aa7f0; }
+        .nx-vt-row.feita .nx-vt-ck { background: #10b981; border-color: #10b981; }
+        .nx-vt-tx { flex: 1; min-width: 0; cursor: pointer; }
+        .nx-vt-tx .tt { font-size: 13px; color: #e5e5e5; line-height: 1.35; overflow-wrap: anywhere; }
+        .nx-vt-row.feita .tt { text-decoration: line-through; color: #6b7280; }
+        .nx-vt-tx .st { display: flex; flex-wrap: wrap; gap: 3px 10px; margin-top: 3px; font-size: 11px; color: #7c7c80; }
+        .nx-vt-tx .st .r { color: #f87171; }
+        .nx-vt-tx .st .a { color: #fbbf24; }
+        .nx-vt-tx .st i { font-size: 9px; margin-right: 3px; }
+        .nx-vt-star { color: #3f3f46; background: none; border: 0; cursor: pointer; padding: 2px 4px; font-size: 12px; flex-shrink: 0; }
+        .nx-vt-star:hover, .nx-vt-star.on { color: #fbbf24; }
+        .nx-vt-empty { padding: 26px 12px; text-align: center; font-size: 12px; color: #6b7280; line-height: 1.6; }
+        .nx-vt-foot { padding: 4px 14px 10px; }
+        .nx-vt-foot button { font-size: 11px; color: #8b8b90; background: none; border: 0; cursor: pointer; padding: 4px 6px; border-radius: 6px; }
+        .nx-vt-foot button:hover { color: #fff; background: #151515; }
+        .notion-btn.nx-on { color: #7aa7f0 !important; background: rgba(66,114,196,.14); }
+
+        /* ---- Motion ao concluir ---- */
+        .nx-burst { position: fixed; width: 0; height: 0; z-index: 9999; pointer-events: none; }
+        .nx-burst .ring { position: absolute; left: -10px; top: -10px; width: 20px; height: 20px; border-radius: 50%; border: 2px solid #34d399; animation: nxRing .6s ease-out forwards; }
+        .nx-burst .chk { position: absolute; left: -10px; top: -10px; width: 20px; height: 20px; border-radius: 50%; background: #10b981; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 10px; animation: nxChk .62s cubic-bezier(.34,1.56,.64,1) forwards; }
+        .nx-burst .pt { position: absolute; left: -2.5px; top: -2.5px; width: 5px; height: 5px; border-radius: 50%; animation: nxPart .62s cubic-bezier(.2,.8,.2,1) forwards; }
+        @keyframes nxRing { from { transform: scale(.6); opacity: 1; } to { transform: scale(2.6); opacity: 0; } }
+        @keyframes nxChk { 0% { transform: scale(.3); opacity: 0; } 40% { transform: scale(1.25); opacity: 1; } 70% { transform: scale(1); opacity: 1; } 100% { transform: scale(1); opacity: 0; } }
+        @keyframes nxPart { 0% { transform: translate(0, 0) scale(1); opacity: 1; } 100% { transform: translate(var(--x), var(--y)) scale(.2); opacity: 0; } }
+        .nx-concluindo { animation: nxConcl .48s cubic-bezier(.4,0,.2,1) forwards; }
+        .nx-concluindo .tt, .nx-concluindo span.truncate, .nx-concluindo span.leading-snug, .nx-concluindo .nx-tb-tt { text-decoration: line-through; color: #6b7280 !important; transition: color .2s; }
+        .nx-concluindo button.rounded-full, .nx-concluindo .nx-vt-ck { background: #10b981 !important; border-color: #10b981 !important; }
+        @keyframes nxConcl { 0% { } 30% { background-color: rgba(16,185,129,.10); } 100% { opacity: .35; transform: translateX(10px); background-color: rgba(16,185,129,.05); } }
+        @media (prefers-reduced-motion: reduce) { .nx-burst, .nx-concluindo { animation: none !important; } }
+        .nx-res-side .nt-res-head { display: none; }
+        .nx-res-side .nt-res-body { resize: none !important; max-height: none !important; overflow: visible !important; }
+        .nx-res-side { margin: 0 !important; border: 0 !important; padding: 0 !important; background: transparent !important; }
+        .nx-res-side .nt-res-body { display: flex; flex-direction: column; gap: 6px; }
+        .nx-res-side .nt-chip { max-width: 100%; }
+        .nx-res-side .nt-res-form { flex-direction: column; }
+        .nx-rec-row { display: flex; gap: 6px; align-items: center; }
+        .nx-rec-row select { flex: 1; }
+        .nx-rec-int { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #8a8a8e; white-space: nowrap; }
+        .nx-rec-int input { width: 52px; }
+        .nx-rec-int.hidden { display: none; }
+        /* Mencoes no texto: [[pagina]] e @tarefa */
+        .note-editor a[href^="#nx-note:"], .note-editor a[href^="#nx-task:"] { text-decoration: none; padding: 0 6px; border-radius: 6px; border: 1px solid rgba(66,114,196,.35); background: rgba(66,114,196,.14); color: #a9c6f7; white-space: nowrap; }
+        .note-editor a[href^="#nx-task:"] { border-color: rgba(52,211,153,.35); background: rgba(52,211,153,.1); color: #86efac; }
+        .note-editor a[href^="#nx-note:"]::before { content: "\f15b"; font-family: "Font Awesome 6 Free"; font-weight: 400; font-size: .78em; margin-right: 5px; }
+        #nx-men { position: fixed; z-index: 9500; width: 300px; max-height: 280px; overflow-y: auto; background: #121212; border: 1px solid #2f2f2f; border-radius: 10px; box-shadow: 0 14px 40px rgba(0,0,0,.6); padding: 4px; display: none; }
+        #nx-men .h { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #6b7280; padding: 6px 8px 4px; }
+        #nx-men .o { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 7px; font-size: 12.5px; color: #d3d3d3; cursor: pointer; }
+        #nx-men .o i { width: 14px; text-align: center; color: #7aa7f0; }
+        #nx-men .o.sel, #nx-men .o:hover { background: rgba(66,114,196,.2); color: #fff; }
+        #nx-men .o .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        /* Linha do tempo */
+        .nx-tl-modal { position: fixed; inset: 0; z-index: 65; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; padding: 24px; }
+        .nx-tl-modal.hidden { display: none; }
+        .nx-tl-box { width: 100%; max-width: 1400px; height: 100%; max-height: 860px; background: #0a0a0a; border: 1px solid #262626; border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+        .nx-tl-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid #262626; background: #111; }
+        .nx-tl-title { font-size: 14px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; }
+        .nx-tl-title i { color: #7aa7f0; }
+        .nx-tl-head select { width: 240px; }
+        .nx-tl-chk { font-size: 12px; color: #a3a3a3; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+        .nx-tl-zoom { margin-left: auto; display: flex; gap: 4px; }
+        .nx-tl-zoom button { padding: 4px 9px; border-radius: 6px; background: #1a1a1a; border: 1px solid #2a2a2a; color: #d3d3d3; font-size: 12px; cursor: pointer; }
+        .nx-tl-zoom button:hover { color: #fff; border-color: #4272c4; }
+        .nx-tl-x { color: #6b7280; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
+        .nx-tl-x:hover { color: #fff; background: rgba(255,255,255,.08); }
+        .nx-tl-body { flex: 1; overflow: auto; position: relative; }
+        .nx-tl-foot { padding: 6px 14px; border-top: 1px solid #262626; font-size: 11px; color: #7c7c80; }
+        .tl-grid { position: relative; }
+        .tl-row { display: flex; height: 32px; border-bottom: 1px solid #161616; }
+        .tl-row.grp { height: 28px; background: #0f0f0f; }
+        .tl-lab { position: sticky; left: 0; z-index: 3; width: 260px; flex-shrink: 0; background: #0a0a0a; border-right: 1px solid #262626; display: flex; align-items: center; gap: 6px; padding: 0 10px; font-size: 12px; color: #d3d3d3; cursor: pointer; overflow: hidden; }
+        .tl-lab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tl-lab:hover { color: #fff; }
+        .tl-row.grp .tl-lab { background: #0f0f0f; font-weight: 700; color: #fff; cursor: default; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+        .tl-track { position: relative; flex-shrink: 0; }
+        .tl-head { position: sticky; top: 0; z-index: 4; background: #0d0d0d; height: 44px; border-bottom: 1px solid #262626; }
+        .tl-head .tl-lab { background: #0d0d0d; font-size: 11px; color: #7c7c80; cursor: default; }
+        .tl-day { position: absolute; top: 0; bottom: 0; border-left: 1px solid #141414; }
+        .tl-day.fds { background: rgba(255,255,255,.02); }
+        .tl-dn { position: absolute; bottom: 4px; font-size: 10px; color: #6b7280; text-align: center; }
+        .tl-dn.hj { color: #7aa7f0; font-weight: 700; }
+        .tl-mes { position: absolute; top: 4px; font-size: 11px; font-weight: 700; color: #a3a3a3; white-space: nowrap; }
+        .tl-hoje { position: absolute; top: 0; bottom: 0; width: 2px; background: #4272c4; opacity: .8; z-index: 1; }
+        .tl-bar { position: absolute; top: 7px; height: 18px; border-radius: 5px; background: #4272c4; color: #fff; font-size: 10px; line-height: 18px; padding: 0 6px; white-space: nowrap; overflow: hidden; cursor: ew-resize; z-index: 2; box-shadow: 0 1px 4px rgba(0,0,0,.4); user-select: none; }
+        .tl-bar.atr { background: #e11d48; }
+        .tl-bar.ok { background: #059669; opacity: .6; }
+        .tl-bar.drag { outline: 2px solid #fff; }
         /* ---- Menu lateral recolhivel (so icones, continua clicavel) ---- */
         #nx-sidebar { transition: width .22s cubic-bezier(.2,.8,.2,1); overflow: hidden; }
         #nx-sidebar.sb-collapsed { width: 56px; }
@@ -3359,99 +3292,71 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             <!-- Antes era flex-shrink-0 com 384px fixos: numa janela pequena ele
                  tomava o espaço todo e sobrava quase nada para a lista. Agora
                  cede largura até 264px antes de a lista ficar apertada. -->
-            <div id="taskDetailDrawer" class="max-w-full h-full bg-[#0a0a0a] border-l border-[#262626] flex flex-col z-30 transition-all duration-200 hidden" style="flex:0 1 384px; min-width:264px">
-                <div class="p-3.5 border-b border-[#262626] flex items-center justify-between">
-                    <span class="text-xs font-bold text-[#8a8a8e] uppercase tracking-wider">Detalhes da Tarefa</span>
-                    <button onclick="closeTaskDetailDrawer()" class="notion-btn p-1 rounded text-gray-400 hover:text-white cursor-pointer"><i class="fa-solid fa-xmark text-xs"></i></button>
+            <div id="taskDetailDrawer" class="nx-dt max-w-full h-full flex flex-col z-30 hidden" style="flex:0 1 384px; min-width:264px">
+                <div class="nx-dt-top">
+                    <span class="nx-dt-kicker"><i class="fa-regular fa-circle-dot"></i> Detalhes da tarefa</span>
+                    <button onclick="closeTaskDetailDrawer()" class="nx-dt-x" title="Fechar"><i class="fa-solid fa-xmark text-xs"></i></button>
                 </div>
-                
-                <div class="flex-1 overflow-y-auto p-4 space-y-3.5 text-xs" id="detailDrawerBody">
-                    <div>
-                        <label class="text-[11px] font-bold text-gray-500 uppercase block mb-1">Título</label>
-                        <input type="text" id="detailTaskTitle" oninput="debouncedUpdateTaskTitle()" class="w-full p-2 bg-white/5 border border-transparent focus:border-white/20 rounded text-xs text-white focus:outline-none">
-                    </div>
 
-                    <div class="grid grid-cols-2 gap-2.5">
-                        <div>
-                            <label class="text-[11px] font-bold text-gray-500 uppercase block mb-1">Categoria</label>
-                            <select id="detailTaskCategory" onchange="updateTaskFromDrawer()" class="w-full p-1.5 bg-[#050505] border border-[#262626] rounded text-xs text-gray-200 focus:outline-none"></select>
-                        </div>
-                        <div>
-                            <label class="text-[11px] font-bold text-gray-500 uppercase block mb-1">Projeto</label>
-                            <select id="detailTaskProject" onchange="updateTaskFromDrawer()" class="w-full p-1.5 bg-[#050505] border border-[#262626] rounded text-xs text-gray-200 focus:outline-none"></select>
-                        </div>
-                    </div>
+                <div class="flex-1 overflow-y-auto nx-dt-body" id="detailDrawerBody">
+                    <textarea id="detailTaskTitle" rows="1" oninput="autoGrow(this); debouncedUpdateTaskTitle()" onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}" class="nx-dt-title" placeholder="Título da tarefa"></textarea>
 
-                    <div class="grid grid-cols-2 gap-2.5">
-                        <div>
-                            <label class="text-[11px] font-bold text-gray-500 uppercase block mb-1">Prioridade</label>
-                            <select id="detailTaskPriority" onchange="updateTaskFromDrawer()" class="w-full p-1.5 bg-[#050505] border border-[#262626] rounded text-xs text-gray-200 focus:outline-none">
-                                <option value="Baixa">Baixa</option>
-                                <option value="Média">Média</option>
-                                <option value="Alta">Alta</option>
-                                <option value="Urgente">Urgente</option>
+                    <div class="nx-dt-row"><span class="k"><i class="fa-regular fa-folder"></i> Projeto</span>
+                        <span class="v"><span class="nx-dt-chip proj" id="detailProjChip"><span class="dot" id="detailProjDot"></span><select id="detailTaskProject" onchange="updateTaskFromDrawer()"></select></span></span></div>
+                    <div class="nx-dt-row"><span class="k"><i class="fa-solid fa-tag"></i> Categoria</span>
+                        <span class="v"><span class="nx-dt-chip cat"><select id="detailTaskCategory" onchange="updateTaskFromDrawer()"></select></span></span></div>
+                    <div class="nx-dt-row"><span class="k"><i class="fa-regular fa-clock"></i> Prazo</span>
+                        <span class="v"><input type="date" id="detailTaskDueDate" onchange="updateTaskFromDrawer()" class="nx-dt-date"></span></div>
+                    <div class="nx-dt-row"><span class="k"><i class="fa-regular fa-flag"></i> Prioridade</span>
+                        <span class="v"><span class="nx-dt-chip prio" id="detailPrioChip"><select id="detailTaskPriority" onchange="updateTaskFromDrawer()">
+                            <option value="Baixa">Baixa</option>
+                            <option value="Média">Média</option>
+                            <option value="Alta">Alta</option>
+                            <option value="Urgente">Urgente</option>
+                        </select></span></span></div>
+                    <div class="nx-dt-row"><span class="k"><i class="fa-solid fa-rotate"></i> Repetir</span>
+                        <span class="v nx-rec-row">
+                            <select id="detailTaskRecFreq" onchange="updateTaskFromDrawer()" class="nx-dt-sel">
+                                <option value="">Não repete</option>
+                                <option value="day">Diariamente</option>
+                                <option value="weekday">Dias úteis (seg-sex)</option>
+                                <option value="week">Semanalmente</option>
+                                <option value="month">Mensalmente</option>
+                                <option value="year">Anualmente</option>
                             </select>
-                        </div>
-                        <div>
-                            <label class="text-[11px] font-bold text-gray-500 uppercase block mb-1">Data Limite</label>
-                            <input type="date" id="detailTaskDueDate" onchange="updateTaskFromDrawer()" class="w-full p-1.5 bg-[#050505] border border-[#262626] rounded text-xs text-gray-200 focus:outline-none">
-                        </div>
-                    </div>
-
-                    <!-- MEU DIA -->
-                    <div>
-                        <span class="text-[11px] font-bold text-gray-400 uppercase mb-1 block">Meu Dia</span>
-                        <button id="detailMyDayBtn" onclick="toggleMyDayFromDrawer()" class="w-full flex items-center justify-between gap-2 p-2 bg-[#050505] border border-[#262626] rounded text-xs transition cursor-pointer hover:border-amber-500/40">
-                            <span class="flex items-center gap-2 min-w-0">
-                                <i id="detailMyDayIcon" class="fa-regular fa-sun text-amber-400 flex-shrink-0"></i>
-                                <span id="detailMyDayLabel" class="truncate text-gray-300">Não está no Meu Dia</span>
-                            </span>
+                            <span id="detailTaskRecIntBox" class="nx-rec-int">a cada <input type="number" id="detailTaskRecInt" min="1" max="99" value="1" onchange="updateTaskFromDrawer()" class="nx-in"></span>
+                        </span></div>
+                    <div class="nx-dt-row"><span class="k"><i class="fa-regular fa-sun"></i> Meu Dia</span>
+                        <span class="v"><button id="detailMyDayBtn" onclick="toggleMyDayFromDrawer()" class="nx-dt-myday">
+                            <i id="detailMyDayIcon" class="fa-regular fa-sun text-amber-400 flex-shrink-0"></i>
+                            <span id="detailMyDayLabel">Não está no Meu Dia</span>
                             <span id="detailMyDayAction" class="text-[10px] font-semibold text-sky-300 flex-shrink-0">Adicionar</span>
-                        </button>
+                        </button></span></div>
+
+                    <div class="nx-dt-sec">
+                        <div class="nx-dt-row"><span class="k"><i class="fa-solid fa-chart-simple"></i> Progresso</span><span id="detailProgressLabel" class="v nx-dt-pct">0%</span></div>
+                        <input type="range" id="detailTaskProgress" min="0" max="100" step="5" oninput="updateProgressFromDrawer(this.value)" class="nx-dt-range">
                     </div>
 
-                    <div>
-                        <div class="flex justify-between text-[11px] font-bold text-gray-400 uppercase mb-1">
-                            <span>Progresso (%)</span>
-                            <span id="detailProgressLabel" class="font-mono text-[#4272c4]">0%</span>
-                        </div>
-                        <input type="range" id="detailTaskProgress" min="0" max="100" step="5" oninput="updateProgressFromDrawer(this.value)" class="w-full accent-[#4272c4] cursor-pointer">
+                    <div class="nx-dt-sec">
+                        <div class="nx-dt-row"><span class="k"><i class="fa-solid fa-list-check"></i> Etapas</span><span id="detailStepsProgress" class="v nx-dt-mute">0/0</span></div>
+                        <div id="detailStepsContainer" class="nx-dt-steps"></div>
+                        <div class="nx-dt-add"><i class="fa-solid fa-plus"></i><input type="text" id="newStepInput" onkeydown="if(event.key==='Enter') addStepFromDrawer()" placeholder="Adicionar etapa"></div>
                     </div>
 
-                    <div class="pt-2 border-t border-[#262626]">
-                        <div class="flex items-center justify-between mb-1.5">
-                            <span class="text-[11px] font-bold text-gray-400 uppercase">Etapas (Checklist)</span>
-                            <span id="detailStepsProgress" class="text-[11px] font-mono text-[#4272c4]">0/0</span>
-                        </div>
-                        <div id="detailStepsContainer" class="space-y-1.5 mb-2"></div>
-                        <div class="flex gap-2">
-                            <input type="text" id="newStepInput" onkeydown="if(event.key==='Enter') addStepFromDrawer()" placeholder="Nova etapa..." class="flex-1 p-1.5 bg-white/5 border border-transparent focus:border-white/20 rounded text-xs text-white focus:outline-none">
-                            <button onclick="addStepFromDrawer()" class="notion-btn px-2.5 py-1 rounded text-xs text-sky-400 hover:text-white cursor-pointer font-bold"><i class="fa-solid fa-plus"></i></button>
-                        </div>
-                    </div>
-
-                    <div class="pt-2 border-t border-[#262626]">
-                        <div class="flex items-center justify-between mb-1.5">
-                            <span class="text-[11px] font-bold text-gray-400 uppercase flex items-center gap-2">
-                                Anexos de Arquivos
-                                <span id="detailAttachmentsCount" class="font-mono text-[#4272c4] normal-case">0</span>
-                            </span>
-                            <button onclick="pickAttachmentForTask()" class="notion-btn px-2 py-1 rounded text-xs text-sky-300 hover:text-white cursor-pointer flex items-center gap-1">
-                                <i class="fa-solid fa-paperclip"></i> Anexar
-                            </button>
-                        </div>
+                    <div class="nx-dt-sec">
+                        <div class="nx-dt-row"><span class="k"><i class="fa-solid fa-paperclip"></i> Anexos <span id="detailAttachmentsCount" class="nx-dt-mute">0</span></span>
+                            <button onclick="pickAttachmentForTask()" class="nx-dt-link"><i class="fa-solid fa-plus"></i> Anexar</button></div>
                         <div id="detailAttachmentsContainer" class="space-y-1"></div>
                     </div>
 
-                    <div class="pt-2 border-t border-[#262626]">
-                        <label class="text-[11px] font-bold text-gray-500 uppercase block mb-1">Anotações</label>
-                        <textarea id="detailTaskNotes" oninput="debouncedUpdateTaskNotes()" rows="4" placeholder="Adicionar notas para esta tarefa..." class="w-full p-2 bg-white/5 border border-transparent focus:border-white/20 rounded text-xs text-gray-200 focus:outline-none resize-none"></textarea>
+                    <div class="nx-dt-sec nx-dt-notes">
+                        <i class="fa-regular fa-note-sticky"></i>
+                        <textarea id="detailTaskNotes" oninput="autoGrow(this); debouncedUpdateTaskNotes()" rows="2" placeholder="Adicionar notas para esta tarefa..."></textarea>
                     </div>
 
-                    <div class="pt-3 border-t border-[#262626] flex justify-between items-center">
-                        <button onclick="deleteCurrentTaskFromDrawer()" class="notion-btn px-2.5 py-1.5 rounded text-xs text-rose-400 hover:bg-rose-500/10 cursor-pointer flex items-center gap-1.5">
-                            <i class="fa-regular fa-trash-can"></i> Excluir Tarefa
-                        </button>
+                    <div class="nx-dt-foot">
+                        <button onclick="deleteCurrentTaskFromDrawer()"><i class="fa-regular fa-trash-can"></i> Excluir tarefa</button>
                         <span id="detailCreatedAt" class="text-[10px] text-gray-500 font-mono"></span>
                     </div>
                 </div>
@@ -3471,43 +3376,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                         <input type="text" id="noteTitleInput" oninput="saveNoteTitleLive()" class="bg-transparent text-lg font-bold text-white placeholder-gray-600 focus:outline-none flex-1 min-w-0 truncate" placeholder="Título da Nota">
                     </div>
                     
-                    <div class="nt-format flex items-center gap-1 bg-white/5 border border-white/5 p-1 rounded text-xs flex-wrap">
-                        <button onclick="formatDoc('bold')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Negrito"><i class="fa-solid fa-bold"></i></button>
-                        <button onclick="formatDoc('italic')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Itálico"><i class="fa-solid fa-italic"></i></button>
-                        <button onclick="formatDoc('underline')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Sublinhado"><i class="fa-solid fa-underline"></i></button>
-                        <button onclick="formatDoc('strikeThrough')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Tachado"><i class="fa-solid fa-strikethrough"></i></button>
-                        <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
-                        <button onclick="formatDoc('formatBlock', '<h1>')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white font-bold" title="H1">H1</button>
-                        <button onclick="formatDoc('formatBlock', '<h2>')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white font-bold" title="H2">H2</button>
-                        <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
-                        <button onclick="formatDoc('insertUnorderedList')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Lista Marcadores"><i class="fa-solid fa-list-ul"></i></button>
-                        <button onclick="formatDoc('insertOrderedList')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Lista Numerada"><i class="fa-solid fa-list-ol"></i></button>
-                        <button onclick="formatDoc('insertHorizontalRule')" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Divisor (linha de separação)"><i class="fa-solid fa-minus"></i></button>
-                        <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
-                        <button onclick="formatDoc('foreColor', '#4272c4')" class="notion-btn px-2 py-1 rounded text-sky-400 hover:text-white" title="Cor Azul"><i class="fa-solid fa-palette"></i></button>
-                        <button onclick="formatDoc('hiliteColor', '#4a441e')" class="notion-btn px-2 py-1 rounded text-amber-300 hover:text-white" title="Marca-texto"><i class="fa-solid fa-highlighter"></i></button>
-                        <button onmousedown="event.preventDefault()" onclick="codeFromSelection()" class="notion-btn px-2 py-1 rounded text-gray-300 hover:text-white" title="Converter seleção em código / script"><i class="fa-solid fa-code"></i></button>
-                        <button onmousedown="event.preventDefault()" onclick="abrirLinkModal()" class="notion-btn px-2 py-1 rounded text-sky-400 hover:text-white" title="Inserir / editar link (Ctrl+K)"><i class="fa-solid fa-link"></i></button>
-                        <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
-                        <!-- BUTTON: LIMPAR FORMATAÇÃO -->
-                        <button onclick="limparFormatacao()" class="notion-btn px-2 py-1 rounded text-rose-400 hover:text-rose-300 font-medium cursor-pointer" title="Limpar Formatação">
-                            <i class="fa-solid fa-eraser mr-1"></i> Limpar Formatação
-                        </button>
-                    </div>
-
-                    <!-- INSERIR NA PÁGINA: Tarefas e Anexos/Links, separados da formatação do texto -->
-                    <div class="nt-insert flex items-center gap-1 bg-white/5 border border-white/5 p-1 rounded text-xs">
-                        <span class="nt-ins-label">Tarefas</span>
-                        <button onclick="insertTaskBlock()" class="notion-btn nt-ib" title="Inserir quadro de tarefas nesta página"><i class="fa-solid fa-list-check"></i><span class="lbl">Quadro</span></button>
-                        <button onclick="taskFromSelection()" class="notion-btn nt-ib" title="Criar tarefa a partir do texto selecionado"><i class="fa-regular fa-square-check"></i><span class="lbl">Da seleção</span></button>
-                        <div class="h-4 w-px bg-[#262626] mx-0.5"></div>
-                        <span class="nt-ins-label">Anexos</span>
-                        <button onclick="ntResNovoLink()" class="notion-btn nt-ib" title="Adicionar um link a esta página"><i class="fa-solid fa-link"></i><span class="lbl">Link</span></button>
-                        <button onclick="ntResNovoArquivo()" class="notion-btn nt-ib" title="Anexar um arquivo do computador a esta página"><i class="fa-solid fa-paperclip"></i><span class="lbl">Arquivo</span></button>
-                        <button id="nt-res-toggle" onclick="ntResToggle()" class="notion-btn nt-ib" title="Mostrar ou ocultar os anexos e links desta página"><i class="fa-solid fa-folder-open"></i><span class="lbl">Ver</span><b id="nt-res-count" class="nt-cnt">0</b></button>
-                    </div>
-
                     <div class="nt-actions flex items-center gap-1.5">
+                        <button id="nt-tasks-btn" onclick="nxToggleTarefasVault()" class="notion-btn px-2 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1 cursor-pointer" title="Ver as tarefas ao lado da página (Split View)">
+                            <i class="fa-solid fa-list-check text-xs"></i> Tarefas
+                        </button>
                         <button onclick="splitPane()" class="notion-btn px-2 py-1 rounded text-xs text-gray-300 hover:text-white flex items-center gap-1 cursor-pointer" title="Dividir a tela (Split View): abre outro painel ao lado">
                             <i class="fa-solid fa-table-columns text-xs"></i> Dividir
                         </button>
@@ -3520,14 +3392,83 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     </div>
                 </div>
 
+                <div id="editor-panes" class="flex-1 flex min-h-0 overflow-hidden bg-black"></div>
+
+                <div class="h-7 border-t border-[#262626] px-6 flex items-center justify-between text-xs text-gray-500 font-mono flex-shrink-0 bg-[#0a0a0a]">
+                    <span id="note-word-count">0 palavras • 0 caracteres</span>
+                    <span id="note-last-saved">Salvo no Vault local</span>
+                </div>
+            </div>
+
+            <!-- TAREFAS AO LADO DA PAGINA (split view) -->
+            <aside id="nx-vtasks" class="nx-vt" style="display:none">
+                <div class="nx-vt-head">
+                    <div class="nx-vt-tt"><span>Tarefas</span><select id="nx-vt-proj" onchange="nxVtEscolher(this.value)" title="O que mostrar"></select></div>
+                    <button onclick="nxToggleTarefasVault(false)" title="Fechar"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="nx-vt-add"><i class="fa-solid fa-plus"></i><input id="nx-vt-input" maxlength="300" autocomplete="off" placeholder="Nova tarefa (Enter)"></div>
+                <div id="nx-vt-list" class="nx-vt-list"></div>
+                <div class="nx-vt-foot"><button id="nx-vt-feitas" onclick="nxVtFeitas()"></button></div>
+            </aside>
+        </main>
+
+        <!-- PAINEL LATERAL DIREITO (abre pela barra de aplicativos) -->
+        <aside id="nx-sidepanel" class="nx-sidepanel hidden">
+            <div class="nx-sp-head"><span id="nx-sp-title"></span>
+                <button type="button" onclick="nxFecharPainel()" title="Fechar"><i class="fa-solid fa-xmark"></i></button></div>
+            <div class="nx-sp-body">
+
+                <section class="nx-sec" data-p="formatacao" onmousedown="event.preventDefault()">
+                    <div class="nx-lbl">Texto</div>
+                    <div class="nx-grid">
+                        <button onclick="formatDoc('bold')" title="Negrito (Ctrl+B)"><i class="fa-solid fa-bold"></i></button>
+                        <button onclick="formatDoc('italic')" title="Itálico (Ctrl+I)"><i class="fa-solid fa-italic"></i></button>
+                        <button onclick="formatDoc('underline')" title="Sublinhado (Ctrl+U)"><i class="fa-solid fa-underline"></i></button>
+                        <button onclick="formatDoc('strikeThrough')" title="Tachado"><i class="fa-solid fa-strikethrough"></i></button>
+                        <button onclick="codeFromSelection()" title="Converter seleção em código / script"><i class="fa-solid fa-code"></i></button>
+                        <button onclick="abrirLinkModal()" title="Inserir / editar link (Ctrl+K)"><i class="fa-solid fa-link"></i></button>
+                    </div>
+                    <div class="nx-lbl">Blocos</div>
+                    <div class="nx-grid">
+                        <button onclick="formatDoc('formatBlock', '<h1>')" title="Título 1"><b>H1</b></button>
+                        <button onclick="formatDoc('formatBlock', '<h2>')" title="Título 2"><b>H2</b></button>
+                        <button onclick="formatDoc('formatBlock', '<p>')" title="Texto normal"><i class="fa-solid fa-paragraph"></i></button>
+                        <button onclick="formatDoc('insertUnorderedList')" title="Lista com marcadores"><i class="fa-solid fa-list-ul"></i></button>
+                        <button onclick="formatDoc('insertOrderedList')" title="Lista numerada"><i class="fa-solid fa-list-ol"></i></button>
+                        <button onclick="formatDoc('insertHorizontalRule')" title="Divisor"><i class="fa-solid fa-minus"></i></button>
+                    </div>
+                    <div class="nx-lbl">Cor do texto</div>
+                    <div class="nx-cores">
+                        <button onclick="formatDoc('foreColor', '#e5e5e5')" style="background:#e5e5e5" title="Padrão"></button>
+                        <button onclick="formatDoc('foreColor', '#4272c4')" style="background:#4272c4" title="Azul"></button>
+                        <button onclick="formatDoc('foreColor', '#34d399')" style="background:#34d399" title="Verde"></button>
+                        <button onclick="formatDoc('foreColor', '#fbbf24')" style="background:#fbbf24" title="Amarelo"></button>
+                        <button onclick="formatDoc('foreColor', '#fb7185')" style="background:#fb7185" title="Vermelho"></button>
+                        <button onclick="formatDoc('foreColor', '#a78bfa')" style="background:#a78bfa" title="Roxo"></button>
+                    </div>
+                    <div class="nx-lbl">Marca-texto</div>
+                    <div class="nx-cores">
+                        <button onclick="formatDoc('hiliteColor', '#4a441e')" style="background:#4a441e" title="Amarelo"></button>
+                        <button onclick="formatDoc('hiliteColor', '#1e3a2f')" style="background:#1e3a2f" title="Verde"></button>
+                        <button onclick="formatDoc('hiliteColor', '#1e2f4a')" style="background:#1e2f4a" title="Azul"></button>
+                        <button onclick="formatDoc('hiliteColor', '#4a1e2a')" style="background:#4a1e2a" title="Rosa"></button>
+                        <button onclick="formatDoc('hiliteColor', 'transparent')" class="nx-cor-off" title="Sem marca-texto"><i class="fa-solid fa-ban"></i></button>
+                    </div>
+                    <button class="nx-wide nx-danger" onclick="limparFormatacao()"><i class="fa-solid fa-eraser"></i> Limpar formatação</button>
+                </section>
+
+                <section class="nx-sec" data-p="anexos">
+                    <div class="nx-row2">
+                        <button class="nx-wide" onclick="ntResNovoLink()"><i class="fa-solid fa-link"></i> Link</button>
+                        <button class="nx-wide" onclick="ntResNovoArquivo()"><i class="fa-solid fa-paperclip"></i> Arquivo</button>
+                    </div>
                 <!-- ANEXOS E LINKS DA PÁGINA (da nota que esta em foco) -->
-                <div id="nt-res" class="nt-res hidden">
+                <div id="nt-res" class="nt-res nx-res-side hidden">
                     <div class="nt-res-head">
                         <i class="fa-solid fa-paperclip"></i><span>Anexos e links desta página</span><b id="nt-res-n"></b>
                         <span class="nt-res-btns">
                             <button type="button" onclick="ntResNovoLink()">+ Link</button>
                             <button type="button" onclick="ntResNovoArquivo()">+ Arquivo</button>
-                            <button type="button" onclick="ntResToggle()" title="Ocultar"><i class="fa-solid fa-chevron-up"></i></button>
                         </span>
                     </div>
                     <div id="nt-res-form" class="nt-res-form hidden">
@@ -3539,61 +3480,87 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     <div id="nt-res-body" class="nt-res-body" onclick="ntResClique(event)" onkeydown="ntResTecla(event)"></div>
                 </div>
 
-                <div id="editor-panes" class="flex-1 flex min-h-0 overflow-hidden bg-black"></div>
+                </section>
 
-                <div class="h-7 border-t border-[#262626] px-6 flex items-center justify-between text-xs text-gray-500 font-mono flex-shrink-0 bg-[#0a0a0a]">
-                    <span id="note-word-count">0 palavras • 0 caracteres</span>
-                    <span id="note-last-saved">Salvo no Vault local</span>
-                </div>
-            </div>
-        </main>
+                <section class="nx-sec" data-p="tarefas">
+                    <div class="nx-row2">
+                        <button class="nx-wide" onmousedown="event.preventDefault()" onclick="insertTaskBlock()"><i class="fa-solid fa-list-check"></i> Quadro</button>
+                        <button class="nx-wide" onmousedown="event.preventDefault()" onclick="taskFromSelection()"><i class="fa-regular fa-square-check"></i> Da seleção</button>
+                    </div>
+                    <div class="nx-lbl">Tarefas desta página</div>
+                    <div id="nx-pg-tarefas" class="nx-list"></div>
+                </section>
 
-        <!-- PAINEL SPOTIFY (player proprio: Web API + Web Playback SDK) -->
-        <aside id="sp-panel" class="sp-panel hidden">
-            <div id="sp-resize" class="sp-resize" title="Arraste para redimensionar" onpointerdown="spResizeIniciar(event)"></div>
-            <div class="sp-head">
-                <span class="sp-title"><i class="fa-brands fa-spotify"></i> Spotify</span>
-                <span id="sp-sub" class="sp-sub"></span>
-                <span class="sp-acts" style="margin-left:auto">
-                    <button type="button" id="sp-btn-sair" class="hidden" onclick="spDesconectar()" title="Desconectar a conta"><i class="fa-solid fa-right-from-bracket"></i></button>
-                    <button type="button" onclick="spotifyToggle()" title="Fechar painel (a música continua tocando)"><i class="fa-solid fa-xmark"></i></button>
-                </span>
-            </div>
-            <div id="sp-body" class="sp-body"><div class="sp-card">Carregando...</div></div>
-            <div id="sp-picker" class="sp-picker hidden" onclick="if (event.target === this) spFecharPicker()"></div>
-            <div id="sp-now" class="sp-now hidden">
-                <div class="sp-np">
-                    <img id="sp-np-img" class="sp-cover" alt="" referrerpolicy="no-referrer">
-                    <div class="sp-r-t">
-                        <div id="sp-np-title" class="sp-r-n">Nada tocando</div>
-                        <div id="sp-np-art" class="sp-r-s"></div>
+                <section class="nx-sec" data-p="mencoes">
+                    <div class="nx-tip">Digite <b>[[</b> no texto para citar outra página e <b>@</b> para citar uma tarefa.</div>
+                    <div class="nx-lbl">Citada em</div>
+                    <div id="nx-men-entrada" class="nx-list"></div>
+                    <div class="nx-lbl">Esta página cita</div>
+                    <div id="nx-men-saida" class="nx-list"></div>
+                </section>
+
+                <section class="nx-sec" data-p="captura">
+                    <input id="nx-cap-input" class="nx-in" placeholder="Ex: Ligar para o dentista amanhã #pessoal !alta" maxlength="300" autocomplete="off">
+                    <div id="nx-cap-prev" class="nx-chips"></div>
+                    <button class="nx-wide nx-primary" onclick="nxCapturaCriar()"><i class="fa-solid fa-plus"></i> Criar tarefa</button>
+                    <div class="nx-tip">
+                        <b>Datas:</b> hoje, amanhã, depois de amanhã, sexta, 25/11, em 3 dias, semana que vem<br>
+                        <b>Projeto:</b> #nome &nbsp; <b>Prioridade:</b> !baixa !media !alta !urgente<br>
+                        <b>Repetir:</b> todo dia, dias úteis, toda segunda, todo mês, a cada 2 semanas
                     </div>
-                    <div class="sp-ctrl">
-                        <button type="button" onclick="spAdicionarAtual()" title="Adicionar esta música a uma playlist"><i class="fa-solid fa-plus"></i></button>
-                        <button type="button" id="sp-shuf" onclick="spShuffle()" title="Modo aleatório"><i class="fa-solid fa-shuffle"></i></button>
-                        <button type="button" onclick="spCmd('prev')" title="Anterior"><i class="fa-solid fa-backward-step"></i></button>
-                        <button type="button" id="sp-pp" class="sp-pp" onclick="spCmd('toggle')" title="Tocar/Pausar"><i class="fa-solid fa-play"></i></button>
-                        <button type="button" onclick="spCmd('next')" title="Próxima"><i class="fa-solid fa-forward-step"></i></button>
-                    </div>
-                </div>
-                <div class="sp-seek">
-                    <span id="sp-t0">0:00</span>
-                    <input type="range" id="sp-seek" min="0" max="1000" value="0" oninput="spSeekInput(this.value)" onchange="spSeekFim(this.value)">
-                    <span id="sp-t1">0:00</span>
-                </div>
-                <div class="sp-vol"><i class="fa-solid fa-volume-low"></i>
-                    <input type="range" id="sp-vol" min="0" max="100" value="60" oninput="spCmd('volume', this.value / 100)">
-                </div>
+                    <div id="nx-cap-status" class="nx-tip"></div>
+                </section>
+
+                <section class="nx-sec" data-p="recorrentes">
+                    <div class="nx-tip">Ao concluir uma tarefa recorrente, a próxima é criada sozinha. Defina em <b>Repetir</b> no detalhe da tarefa ou escreva "toda segunda" na captura rápida.</div>
+                    <div id="nx-rec-lista" class="nx-list"></div>
+                </section>
+
+                <section class="nx-sec" data-p="modelos">
+                    <div class="nx-tip">Monte do zero um projeto com as tarefas e prazos que sempre se repetem, ou o esqueleto de uma página, e reutilize quando precisar.</div>
+                    <button id="nx-tpl-novo" class="nx-wide nx-primary" onclick="nxTplNovo('project')"><i class="fa-solid fa-plus"></i> Criar modelo</button>
+                    <div id="nx-tpl-editor" class="nx-tpl-ed" style="display:none"></div>
+                    <div class="nx-lbl">Seus modelos</div>
+                    <div id="nx-tpl-lista" class="nx-list"></div>
+                </section>
             </div>
         </aside>
 
         <!-- BARRA DE APLICATIVOS (lado direito) -->
         <div id="nx-apprail" class="nx-apprail">
-            <button type="button" id="sp-rail-btn" onclick="spotifyToggle()" data-tip="Spotify"><i class="fa-brands fa-spotify"></i></button>
+            <div id="nx-rail-vault" class="nx-rail-grp">
+                <button type="button" data-b="formatacao" onclick="nxAbrirPainel('formatacao')" data-tip="Formatação"><i class="fa-solid fa-font"></i></button>
+                <button type="button" id="nt-res-toggle" data-b="anexos" onclick="nxAbrirPainel('anexos')" data-tip="Anexos e links"><i class="fa-solid fa-paperclip"></i><b id="nt-res-count" class="nx-rbc"></b></button>
+                <button type="button" data-b="tarefas" onclick="nxAbrirPainel('tarefas')" data-tip="Tarefas da página"><i class="fa-solid fa-list-check"></i><b id="nx-rb-tarefas" class="nx-rbc"></b></button>
+                <button type="button" data-b="mencoes" onclick="nxAbrirPainel('mencoes')" data-tip="Menções e backlinks"><i class="fa-solid fa-at"></i><b id="nx-rb-mencoes" class="nx-rbc"></b></button>
+                <span class="nx-rail-sep"></span>
+            </div>
+            <button type="button" data-b="captura" onclick="nxAbrirPainel('captura')" data-tip="Captura rápida (Ctrl+Alt+N)"><i class="fa-solid fa-bolt"></i></button>
+            <button type="button" data-b="recorrentes" onclick="nxAbrirPainel('recorrentes')" data-tip="Tarefas recorrentes"><i class="fa-solid fa-rotate"></i></button>
+            <button type="button" data-b="modelos" onclick="nxAbrirPainel('modelos')" data-tip="Modelos"><i class="fa-solid fa-layer-group"></i></button>
+            <button type="button" data-b="timeline" onclick="abrirTimeline()" data-tip="Linha do tempo"><i class="fa-solid fa-chart-gantt"></i></button>
         </div>
+
     </div>
 
-    <iframe id="sp-frame" class="sp-frame" allow="autoplay; encrypted-media" tabindex="-1" aria-hidden="true" title="Player do Spotify"></iframe>
+    <!-- LINHA DO TEMPO (Gantt leve) -->
+    <div id="timelineModal" class="nx-tl-modal hidden" onclick="if (event.target === this) fecharTimeline()">
+        <div class="nx-tl-box">
+            <div class="nx-tl-head">
+                <span class="nx-tl-title"><i class="fa-solid fa-chart-gantt"></i> Linha do tempo</span>
+                <select id="tl-proj" class="nx-in" onchange="renderTimeline()"></select>
+                <label class="nx-tl-chk"><input type="checkbox" id="tl-done" onchange="renderTimeline()"> Mostrar concluídas</label>
+                <span class="nx-tl-zoom">
+                    <button type="button" onclick="tlZoom(-1)" title="Diminuir zoom"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
+                    <button type="button" onclick="tlZoom(1)" title="Aumentar zoom"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
+                    <button type="button" onclick="tlHoje()" title="Ir para hoje">Hoje</button>
+                </span>
+                <button type="button" class="nx-tl-x" onclick="fecharTimeline()" title="Fechar"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div id="tl-body" class="nx-tl-body"></div>
+            <div id="tl-foot" class="nx-tl-foot"></div>
+        </div>
+    </div>
 
     <!-- PROFILE MODAL -->
     <div id="profileModal" class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 hidden">
@@ -3920,39 +3887,12 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         </div>
     </div>
 
-    <div id="notifModal" class="fixed inset-0 bg-black/70 z-[60] hidden items-center justify-center p-4">
-        <div class="bg-[#0a0a0a] border border-[#262626] rounded w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
-            <div class="p-4 border-b border-[#262626] flex items-center justify-between bg-[#1e1e1e]">
-                <div class="flex items-center gap-2.5">
-                    <div class="w-8 h-8 rounded bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-[#4272c4] flex-shrink-0">
-                        <i class="fa-solid fa-bell text-sm"></i>
-                    </div>
-                    <div>
-                        <div class="text-sm font-bold text-white flex items-center gap-2">
-                            Tarefas & Prazos
-                            <span id="notifTotalBadge" class="text-[10px] font-mono font-normal px-2 py-0.5 rounded bg-white/10 text-gray-300">0 alertas</span>
-                        </div>
-                        <div class="text-[11px] text-gray-400">Monitoramento de tarefas com data limite</div>
-                    </div>
-                </div>
-                <div class="flex items-center gap-2">
-                    <button onclick="testarNotificacaoWindows()" title="Testar notificação no Windows" class="text-xs text-sky-400 hover:text-white px-2.5 py-1 rounded bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/20 cursor-pointer flex items-center gap-1.5 transition">
-                        <i class="fa-solid fa-volume-high text-[10px]"></i> <span>Testar Som</span>
-                    </button>
-                    <button onclick="fecharNotificacoesModal()" class="text-gray-500 hover:text-white cursor-pointer p-1.5"><i class="fa-solid fa-xmark text-sm"></i></button>
-                </div>
-            </div>
-
-            <div id="notificationList" class="p-4 overflow-y-auto flex-1 space-y-3 text-xs">
-                <!-- Itens renderizados dinamicamente via JS -->
-            </div>
-
-            <div class="p-3 border-t border-[#262626] bg-[#1a1a1a] flex items-center justify-between text-xs text-gray-400">
-                <span class="flex items-center gap-1.5 text-[11px]"><i class="fa-brands fa-windows text-sky-400"></i> Notificações Desktop Ativas</span>
-                <button onclick="checkDeadlinesAndNotify(true)" class="text-xs text-sky-400 hover:text-sky-300 hover:underline cursor-pointer flex items-center gap-1">
-                    <i class="fa-solid fa-rotate-right text-[10px]"></i> Atualizar agora
-                </button>
-            </div>
+    <div id="notifModal" class="nx-notif hidden">
+        <div class="nx-notif-head"><span>Central de Notificações de Prazos</span><span id="notifTotalBadge" class="nx-notif-count">0</span></div>
+        <div id="notificationList" class="nx-notif-list"></div>
+        <div class="nx-notif-foot">
+            <button onclick="testarNotificacaoWindows()" title="Enviar uma notificação de teste ao Windows"><i class="fa-regular fa-bell"></i> Testar aviso</button>
+            <button onclick="checkDeadlinesAndNotify(true)" title="Verificar os prazos agora"><i class="fa-solid fa-rotate-right"></i> Atualizar</button>
         </div>
     </div>
 
@@ -4049,6 +3989,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             if (!Array.isArray(state.projects)) state.projects = [];
             if (!Array.isArray(state.tasks)) state.tasks = [];
             if (!Array.isArray(state.notepad)) state.notepad = [];
+            if (!Array.isArray(state.templates)) state.templates = [];
             if (!state.userProfile || typeof state.userProfile !== 'object') state.userProfile = { name: "", subtitle: "", avatar: null };
 
             // Lista vazia e um estado VALIDO: nao recria a categoria de exemplo.
@@ -4277,7 +4218,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             const box = _ntEl('nt-res'); if (!box) return;
             const n = ntResNota();
             const lista = n && Array.isArray(n.resources) ? n.resources : [];
-            const cnt = _ntEl('nt-res-count'); if (cnt) cnt.textContent = lista.length;
+            const cnt = _ntEl('nt-res-count'); if (cnt) cnt.textContent = lista.length || '';
             const tg = _ntEl('nt-res-toggle'); if (tg) tg.style.opacity = n ? '1' : '.45';
             if (!n || !ntResAberto) { box.classList.add('hidden'); return; }
             box.classList.remove('hidden');
@@ -4589,545 +4530,880 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             });
         })();
 
-        /* ---------------- Painel Spotify (player proprio: Web API + Web Playback SDK) ---------------- */
-        const SP_ORIGEM = 'http://127.0.0.1:8898';
-        let spAberto = false, spW = 380, spInfo = null, spMe = null, spDevice = '', spState = null;
-        let spIniciado = false, spTab = 'playlists', spSeeking = false, spBuscaT = 0, spTimer = null, spPollConn = null;
-        let spPlOffset = 0, spPlAtual = null, spShufflePref = null;
-        try { spW = Number(localStorage.getItem('nx-sp-w')) || 380; } catch (e) { }
+        /* =====================================================================
+           BARRA DE APLICATIVOS + PAINEL LATERAL DIREITO
+           ===================================================================== */
+        const NX_PAINEIS = {
+            formatacao: 'Formatação', anexos: 'Anexos e links', tarefas: 'Tarefas da página',
+            mencoes: 'Menções e backlinks', captura: 'Captura rápida', recorrentes: 'Tarefas recorrentes', modelos: 'Modelos'
+        };
+        const NX_DA_VAULT = ['formatacao', 'anexos', 'tarefas', 'mencoes'];
+        let nxPainel = null;
 
-        function spAplicarLargura(w) {
-            spW = Math.max(320, Math.min(700, Math.min(w, window.innerWidth - 640)));
-            const p = document.getElementById('sp-panel');
-            if (p) p.style.width = spW + 'px';
+        function nxAbrirPainel(id, forcar) {
+            if (!NX_PAINEIS[id]) return;
+            if (nxPainel === id && !forcar) { nxFecharPainel(); return; }
+            if (NX_DA_VAULT.includes(id) && appMode !== 'notepad') switchAppMode('notepad');
+            nxPainel = id;
+            const pop = document.getElementById('nx-sidepanel');
+            pop.classList.remove('hidden');
+            pop.style.animation = 'none'; void pop.offsetWidth; pop.style.animation = '';
+            const topo = 56;   // logo abaixo do cabecalho, como o aviso de atualizacao; cresce para baixo
+            pop.style.top = topo + 'px';
+            pop.style.maxHeight = (window.innerHeight - topo - 16) + 'px';
+            document.getElementById('nx-sp-title').textContent = NX_PAINEIS[id];
+            document.querySelectorAll('#nx-sidepanel .nx-sec').forEach(sec => sec.classList.toggle('on', sec.dataset.p === id));
+            nxRailSync();
+            nxRenderPainel();
+            if (id === 'captura') setTimeout(() => { const i = document.getElementById('nx-cap-input'); if (i) i.focus(); }, 30);
         }
-        spAplicarLargura(spW);
-        function spResizeIniciar(e) {
-            e.preventDefault();
-            const h = e.currentTarget, x0 = e.clientX, w0 = spW;
-            h.setPointerCapture(e.pointerId);
-            h.classList.add('drag');
-            const mover = ev => spAplicarLargura(w0 + (x0 - ev.clientX));
-            const soltar = () => {
-                h.classList.remove('drag');
-                h.removeEventListener('pointermove', mover);
-                h.removeEventListener('pointerup', soltar);
-                h.removeEventListener('pointercancel', soltar);
-                try { localStorage.setItem('nx-sp-w', String(spW)); } catch (err) { }
+        function nxFecharPainel() {
+            nxPainel = null;
+            document.getElementById('nx-sidepanel').classList.add('hidden');
+            nxRailSync();
+        }
+        function nxRailSync() {
+            const naVault = appMode === 'notepad';
+            const g = document.getElementById('nx-rail-vault');
+            if (g) g.classList.toggle('hidden', !naVault);
+            if (!naVault && NX_DA_VAULT.includes(nxPainel)) { nxFecharPainel(); return; }
+            document.querySelectorAll('#nx-apprail button[data-b]').forEach(b => b.classList.toggle('on', b.dataset.b === nxPainel));
+            const n = ntResNota();
+            const qt = n ? state.tasks.filter(t => t.noteId === n.id && (Number(t.progress) || 0) < 100).length : 0;
+            const bt = document.getElementById('nx-rb-tarefas'); if (bt) bt.textContent = qt || '';
+            const bm = document.getElementById('nx-rb-mencoes'); if (bm) bm.textContent = n ? (nxCitacoesDe(n.id).length || '') : '';
+            const br = document.getElementById('nt-res-count'); if (br && !(Number(br.textContent) > 0)) br.textContent = '';
+        }
+        function nxRenderPainel() {
+            if (nxPainel === 'anexos') ntResRender();
+            else if (nxPainel === 'tarefas') nxRenderTarefasPagina();
+            else if (nxPainel === 'mencoes') nxRenderMencoes();
+            else if (nxPainel === 'recorrentes') nxRenderRecorrentes();
+            else if (nxPainel === 'modelos') nxRenderModelos();
+            else if (nxPainel === 'captura') { nxCapturaPreview(); nxCapturaStatus(); }
+        }
+        function nxPainelAtualizar() {
+            try { nxRailSync(); if (nxPainel && nxPainel !== 'captura') nxRenderPainel(); } catch (e) { console.warn(e); }
+        }
+
+        // Os anexos agora vivem no painel lateral: abrir = abrir o painel.
+        ntResAberto = true;
+        ntResAbrirPainel = function () { ntResAberto = true; nxAbrirPainel('anexos', true); };
+        ntResToggle = function () {
+            if (!ntResNota()) { showToast('Abra uma nota do Vault primeiro.'); return; }
+            nxAbrirPainel('anexos');
+        };
+
+        // Mantem o painel em dia com o resto do app sem mexer em cada funcao.
+        (function () {
+            const _ra = renderAll; renderAll = function () { const r = _ra.apply(this, arguments); nxPainelAtualizar(); return r; };
+            const _rh = refreshNoteHeader; refreshNoteHeader = function () { const r = _rh.apply(this, arguments); nxPainelAtualizar(); return r; };
+            const _sm = switchAppMode; switchAppMode = function () { const r = _sm.apply(this, arguments); nxPainelAtualizar(); return r; };
+        })();
+
+        function nxItem(icone, titulo, sub, attrs, extraCls) {
+            return `<div class="nx-item ${extraCls || ''}" ${attrs || ''}><i class="${icone}"></i><span class="t">${escapeHtml(titulo)}${sub ? `<span class="s">${sub}</span>` : ''}</span></div>`;
+        }
+
+        function nxRenderTarefasPagina() {
+            const box = document.getElementById('nx-pg-tarefas'); if (!box) return;
+            const n = ntResNota();
+            if (!n) { box.innerHTML = '<div class="nx-empty">Abra uma página do Vault.</div>'; return; }
+            const lista = state.tasks.filter(t => t.noteId === n.id)
+                .sort((a, b) => ((Number(a.progress) || 0) >= 100) - ((Number(b.progress) || 0) >= 100));
+            box.innerHTML = lista.length ? lista.map(t => {
+                const feita = (Number(t.progress) || 0) >= 100;
+                const sub = [t.dueDate ? formatDateBR(t.dueDate) : '', t.priority || '', t.recurrence ? textoRecorrencia(t.recurrence) : ''].filter(Boolean).join(' · ');
+                return nxItem(feita ? 'fa-solid fa-circle-check' : 'fa-regular fa-circle', t.title || '', escapeHtml(sub),
+                    `onclick="openTaskPeek('${escapeJsStr(t.id)}')"`, feita ? 'done' : '');
+            }).join('') : '<div class="nx-empty">Nenhuma tarefa nesta página. Use "Quadro" ou selecione um texto e clique em "Da seleção".</div>';
+        }
+
+        /* ---------------- Mencoes e backlinks ---------------- */
+        function nxCitacoesDe(noteId) {
+            const alvo = '#nx-note:' + noteId;
+            return state.notepad.filter(n => n.id !== noteId && String(n.content || '').includes(alvo));
+        }
+        function nxCitadosPor(nota) {
+            const html = String((nota && nota.content) || '');
+            const notas = [], tarefas = [];
+            html.replace(/#nx-(note|task):([A-Za-z0-9_\-]+)/g, (m, tipo, id) => {
+                const lista = tipo === 'note' ? notas : tarefas;
+                if (!lista.includes(id)) lista.push(id);
+                return m;
+            });
+            return {
+                notas: notas.map(id => state.notepad.find(n => n.id === id)).filter(Boolean),
+                tarefas: tarefas.map(id => state.tasks.find(t => t.id === id)).filter(Boolean)
             };
-            h.addEventListener('pointermove', mover);
-            h.addEventListener('pointerup', soltar);
-            h.addEventListener('pointercancel', soltar);
+        }
+        function nxAbrirPaginaCitada(id) {
+            if (!state.notepad.some(n => n.id === id)) { showToast('Esta página não existe mais.'); return; }
+            abrirNotaDaTarefa(id);
+        }
+        function nxRenderMencoes() {
+            const ent = document.getElementById('nx-men-entrada'), sai = document.getElementById('nx-men-saida');
+            if (!ent || !sai) return;
+            const n = ntResNota();
+            if (!n) { ent.innerHTML = sai.innerHTML = '<div class="nx-empty">Abra uma página do Vault.</div>'; return; }
+            const de = nxCitacoesDe(n.id);
+            ent.innerHTML = de.length ? de.map(x => nxItem('fa-regular fa-file-lines', x.title || 'Sem título', '',
+                `onclick="nxAbrirPaginaCitada('${escapeJsStr(x.id)}')"`)).join('') : '<div class="nx-empty">Nenhuma página cita esta ainda.</div>';
+            const c = nxCitadosPor(n);
+            const itens = c.notas.map(x => nxItem('fa-regular fa-file-lines', x.title || 'Sem título', '', `onclick="nxAbrirPaginaCitada('${escapeJsStr(x.id)}')"`))
+                .concat(c.tarefas.map(t => nxItem((Number(t.progress) || 0) >= 100 ? 'fa-solid fa-circle-check' : 'fa-regular fa-square-check', t.title || '',
+                    t.dueDate ? 'Prazo ' + formatDateBR(t.dueDate) : '', `onclick="openTaskPeek('${escapeJsStr(t.id)}')"`)));
+            sai.innerHTML = itens.length ? itens.join('') : '<div class="nx-empty">Esta página ainda não cita nada.</div>';
         }
 
-        function spApi() { return window.pywebview && window.pywebview.api; }
-        async function spChamar(metodo, caminho, corpo) {
-            const a = spApi();
-            if (!a || !a.spotify_api) return { status: 0, message: 'Disponível só no aplicativo desktop.' };
-            try { return await a.spotify_api(metodo, caminho, corpo === undefined ? null : corpo); }
-            catch (e) { return { status: 0, message: String(e) }; }
-        }
-        const spOk = r => r && r.status >= 200 && r.status < 300;
-        const spUriOk = u => /^spotify:(track|album|playlist|episode|artist):[A-Za-z0-9]{10,30}$/.test(String(u || ''));
-        const spIdOk = i => /^[A-Za-z0-9]{10,30}$/.test(String(i || ''));
-        const spImg = u => /^https:\/\/[a-z0-9.-]+\.(scdn\.co|spotifycdn\.com)\//i.test(String(u || '')) ? u : '';
-        function spFmt(ms) { const s = Math.max(0, Math.floor((ms || 0) / 1000)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
-        const spBody = () => document.getElementById('sp-body');
-
-        function spotifyToggle() {
-            spAberto = !spAberto;
-            document.getElementById('sp-panel').classList.toggle('hidden', !spAberto);
-            const b = document.getElementById('sp-rail-btn');
-            if (b) b.classList.toggle('on', spAberto);
-            if (spAberto && !spIniciado) { spIniciado = true; spCarregar(); }
-        }
-
-        function spCabecalho() {
-            const sub = document.getElementById('sp-sub');
-            const sair = document.getElementById('sp-btn-sair');
-            const conectado = !!(spInfo && spInfo.connected);
-            if (sub) sub.textContent = conectado && spMe ? (spMe.display_name || spMe.id || '') : '';
-            if (sair) sair.classList.toggle('hidden', !(spInfo && (spInfo.connected || spInfo.clientId)));
-            document.getElementById('sp-now').classList.toggle('hidden', !conectado);
-        }
-
-        async function spCarregar() {
-            const a = spApi();
-            if (!a || !a.spotify_info) { spBody().innerHTML = '<div class="sp-card">O Spotify só está disponível no aplicativo desktop.</div>'; return; }
-            try { spInfo = await a.spotify_info(); } catch (e) { spBody().innerHTML = '<div class="sp-card sp-err">Falha ao iniciar: ' + escapeHtml(String(e)) + '</div>'; return; }
-            spCabecalho();
-            if (!spInfo.clientId) return spRenderSetup();
-            if (!spInfo.connected) return spRenderConectar();
-            spRenderPrincipal();
-            spIniciarPlayer();
-            if (!spMe) {
-                const r = await spChamar('GET', '/v1/me');
-                if (spOk(r)) { spMe = r.data; spCabecalho(); spListarPlaylists(); }
-                else if (r.status === 403) spAviso('O Spotify bloqueou o app (403). No modo de desenvolvimento, o dono do app precisa ter Premium e a sua conta deve estar liberada em User Management no dashboard.');
+        /* Autocompletar: [[ lista paginas, @ lista tarefas */
+        let nxMen = null;
+        const nxMenBox = (() => { const d = document.createElement('div'); d.id = 'nx-men'; document.body.appendChild(d); return d; })();
+        nxMenBox.addEventListener('mousedown', e => {
+            e.preventDefault();
+            const o = e.target.closest('.o'); if (!o || !nxMen) return;
+            nxMen.idx = Number(o.dataset.i); nxMenEscolher();
+        });
+        function nxMenFechar() { nxMen = null; nxMenBox.style.display = 'none'; }
+        function nxMenDetectar(ed) {
+            const sel = window.getSelection();
+            if (!sel || !sel.rangeCount || !sel.isCollapsed) return nxMenFechar();
+            const tn = sel.anchorNode;
+            if (!tn || tn.nodeType !== 3 || !ed.contains(tn) || (tn.parentElement && tn.parentElement.closest('a, pre, code, .nx-taskblock'))) return nxMenFechar();
+            const antes = tn.nodeValue.slice(0, sel.anchorOffset);
+            let tipo = null, q = '', ini = 0, m;
+            if ((m = antes.match(/\[\[([^\[\]\n]{0,40})$/))) { tipo = 'note'; q = m[1]; ini = antes.length - m[0].length; }
+            else if ((m = antes.match(/(^|[\s\u00a0])@([^\s\u00a0@]{0,30})$/))) { tipo = 'task'; q = m[2]; ini = antes.length - m[2].length - 1; }
+            if (!tipo) return nxMenFechar();
+            const nq = _norm(q);
+            const atual = _notaDoEditor(ed);
+            let itens;
+            if (tipo === 'note') {
+                itens = state.notepad.filter(n => n.id !== atual && (!nq || _norm(n.title).includes(nq)))
+                    .slice(0, 8).map(n => ({ id: n.id, titulo: n.title || 'Sem título', icone: n.icon || 'fa-regular fa-file-lines' }));
+                if (q.trim() && !state.notepad.some(n => _norm(n.title) === nq)) itens.push({ novo: true, titulo: q.trim(), icone: 'fa-solid fa-plus' });
+            } else {
+                itens = state.tasks.filter(t => !nq || _norm(t.title).includes(nq))
+                    .sort((a, b) => ((Number(a.progress) || 0) >= 100) - ((Number(b.progress) || 0) >= 100))
+                    .slice(0, 8).map(t => ({ id: t.id, titulo: t.title || '', icone: (Number(t.progress) || 0) >= 100 ? 'fa-solid fa-circle-check' : 'fa-regular fa-square-check' }));
             }
+            if (!itens.length) return nxMenFechar();
+            nxMen = { ed, tipo, tn, ini, fim: sel.anchorOffset, itens, idx: nxMen && nxMen.tipo === tipo ? Math.min(nxMen.idx, itens.length - 1) : 0 };
+            nxMenPintar();
+            const rg = sel.getRangeAt(0).cloneRange();
+            let rect = rg.getBoundingClientRect();
+            if (!rect || (!rect.width && !rect.height && !rect.top)) rect = tn.parentElement.getBoundingClientRect();
+            nxMenBox.style.display = 'block';
+            const h = nxMenBox.offsetHeight;
+            nxMenBox.style.left = Math.max(8, Math.min(window.innerWidth - 310, rect.left)) + 'px';
+            nxMenBox.style.top = (rect.bottom + h + 12 < window.innerHeight ? rect.bottom + 6 : rect.top - h - 6) + 'px';
         }
-
-        function spRenderSetup(erro) {
-            spBody().innerHTML = `
-                <div class="sp-card">
-                    <h3>Conectar o Spotify (só uma vez)</h3>
-                    <ol class="sp-steps">
-                        <li>Abra o <a onclick="spotifyUrl('https://developer.spotify.com/dashboard')">Spotify for Developers</a> e crie um app.</li>
-                        <li>Em <b>Redirect URIs</b>, adicione exatamente:<code class="sp-code">${escapeHtml(spInfo ? spInfo.redirect : '')}</code></li>
-                        <li>Marque <b>Web API</b> e <b>Web Playback SDK</b> e salve.</li>
-                        <li>Em <b>User Management</b>, adicione o e-mail da sua conta Spotify.</li>
-                        <li>Copie o <b>Client ID</b> e cole abaixo.</li>
-                    </ol>
-                    <input id="sp-cid" class="sp-input" placeholder="Client ID (32 caracteres)" spellcheck="false" autocomplete="off">
-                    <button type="button" class="sp-btn" onclick="spSalvarClient()">Salvar e continuar</button>
-                    ${erro ? `<div class="sp-err">${escapeHtml(erro)}</div>` : ''}
-                    <div class="sp-note">Exige conta <b>Premium</b> (regra do Spotify para tocar dentro de outros aplicativos). Seu login fica só neste computador.</div>
-                </div>`;
+        function nxMenPintar() {
+            const titulo = nxMen.tipo === 'note' ? 'Citar página' : 'Citar tarefa';
+            nxMenBox.innerHTML = `<div class="h">${titulo}</div>` + nxMen.itens.map((it, i) =>
+                `<div class="o ${i === nxMen.idx ? 'sel' : ''}" data-i="${i}"><i class="${escapeHtml(it.icone)}"></i><span class="t">${it.novo ? 'Criar página “' + escapeHtml(it.titulo) + '”' : escapeHtml(it.titulo)}</span></div>`).join('');
         }
-        async function spSalvarClient() {
-            const v = (document.getElementById('sp-cid') || {}).value || '';
-            const r = await spApi().spotify_salvar_client(v);
-            if (r && r.status === 'success') return spCarregar();
-            spRenderSetup(r && r.message);
-        }
-
-        function spRenderConectar(msg, url) {
-            spBody().innerHTML = `
-                <div class="sp-card">
-                    <h3>Entrar no Spotify</h3>
-                    <div class="sp-note" style="margin-top:0">${msg ? escapeHtml(msg) : 'O login abre no seu navegador padrão. Depois de autorizar, volte ao NEXUS.'}</div>
-                    ${url ? `<div class="sp-note">Se o navegador não abriu, <a onclick="spotifyUrl('${escapeHtml(escapeJsStr(url))}')">clique aqui</a>.</div>` : ''}
-                    <button type="button" class="sp-btn" onclick="spConectar()">Conectar ao Spotify</button>
-                    ${spInfo && spInfo.erro ? `<div class="sp-err">${escapeHtml(spInfo.erro)}</div>` : ''}
-                    <button type="button" class="sp-btn ghost" onclick="spTrocarClient()">Trocar Client ID</button>
-                </div>`;
-        }
-        function spTrocarClient() { spInfo.clientId = false; spRenderSetup(); }
-        async function spConectar() {
-            const r = await spApi().spotify_conectar();
-            if (!r || r.status !== 'success') { spRenderConectar((r && r.message) || 'Falha ao iniciar o login.'); return; }
-            spRenderConectar('Aguardando você autorizar no navegador...', r.url);
-            let n = 0;
-            clearInterval(spPollConn);
-            spPollConn = setInterval(async () => {
-                n++;
-                const i = await spApi().spotify_info();
-                if (i && i.connected && !i.reauth) { clearInterval(spPollConn); spPollConn = null; spCarregar(); }
-                else if (n > 160) { clearInterval(spPollConn); spPollConn = null; spRenderConectar('Tempo esgotado. Tente conectar de novo.'); }
-            }, 1500);
-        }
-        async function spDesconectar() {
-            if (!confirm('Desconectar a conta do Spotify neste computador?')) return;
-            clearInterval(spTimer); spTimer = null;
-            const f = document.getElementById('sp-frame');
-            if (f) { f.src = 'about:blank'; f.dataset.on = ''; }
-            await spApi().spotify_desconectar();
-            spMe = null; spDevice = ''; spState = null; spPlAtual = null;
-            spCarregar();
-        }
-        function spotifyUrl(u) {
-            const a = spApi();
-            if (a && a.open_external) a.open_external(u);
-        }
-
-        function spRenderPrincipal() {
-            spBody().innerHTML = `
-                <div class="sp-tabs">
-                    <button type="button" id="sp-tab-playlists" onclick="spAba('playlists')">Playlists</button>
-                    <button type="button" id="sp-tab-buscar" onclick="spAba('buscar')">Buscar</button>
-                    <button type="button" id="sp-tab-fila" onclick="spAba('fila')">Fila</button>
-                </div>
-                ${spInfo && spInfo.reauth ? '<div class="sp-reauth">Para adicionar músicas a playlists, reautorize a conta. <a onclick="spConectar()">Reautorizar</a></div>' : ''}
-                <div id="sp-aviso" class="sp-aviso"></div>
-                <div id="sp-lista" class="sp-lista"></div>`;
-            spAba(spTab);
-        }
-        function spAviso(msg, ok) { const el = document.getElementById('sp-aviso'); if (!el) return; el.textContent = msg || ''; el.classList.toggle('ok', !!ok); }
-        function spAba(t) {
-            spTab = t;
-            ['playlists', 'buscar', 'fila'].forEach(k => { const b = document.getElementById('sp-tab-' + k); if (b) b.classList.toggle('on', k === t); });
-            if (t === 'playlists') { spPlAtual = null; spListarPlaylists(); }
-            else if (t === 'fila') spRenderFila();
-            else spRenderBusca();
-        }
-
-        function spLinha(o) {
-            // o: {act, uri, ctx, id, name, i, img, titulo, sub, badge, play, add, atual}
-            const d = ['act', 'uri', 'ctx', 'id', 'name', 'i'].map(k => o[k] ? ` data-${k}="${escapeHtml(o[k])}"` : '').join('');
-            const img = spImg(o.img);
-            return `<div class="sp-row ${o.atual ? 'tocando' : ''}"${d} onclick="spClick(this)">
-                ${img ? `<img class="sp-cover" src="${escapeHtml(img)}" alt="" referrerpolicy="no-referrer">` : '<div class="sp-cover"></div>'}
-                <div class="sp-r-t"><div class="sp-r-n">${escapeHtml(o.titulo || '')}</div><div class="sp-r-s">${o.badge ? `<span class="sp-badge">${escapeHtml(o.badge)}</span>` : ''}${escapeHtml(o.sub || '')}</div></div>
-                ${o.add ? `<button type="button" class="sp-r-b" title="Adicionar a uma playlist" data-act="add" data-uri="${escapeHtml(o.add.uri)}" onclick="event.stopPropagation(); spClick(this)"><i class="fa-solid fa-plus"></i></button>` : ''}
-                ${o.play ? `<button type="button" class="sp-r-b" title="Tocar" data-act="${escapeHtml(o.play.act)}" data-uri="${escapeHtml(o.play.uri)}" onclick="event.stopPropagation(); spClick(this)"><i class="fa-solid fa-play"></i></button>` : ''}
-            </div>`;
-        }
-        function spClick(el) {
-            const d = el.dataset;
-            if (d.act === 'play-ctx' && spUriOk(d.uri)) spTocar({ context_uri: d.uri });
-            else if (d.act === 'play-track' && spUriOk(d.uri)) spTocar({ uris: [d.uri] });
-            else if (d.act === 'play-in' && spUriOk(d.uri) && spUriOk(d.ctx)) spTocar({ context_uri: d.ctx, offset: { uri: d.uri } });
-            else if (d.act === 'open-pl' && spIdOk(d.id) && spUriOk(d.uri)) spAbrirPlaylist(d.id, d.name || 'Playlist', d.uri, 0);
-            else if (d.act === 'add') spAbrirPicker(d.uri);
-            else if (d.act === 'pick') spAdicionar(d.id, d.name || 'playlist');
-            else if (d.act === 'nova') spNovaPlaylist();
-            else if (d.act === 'fila-play' && spFilaPlanejada) {
-                const i = Number(d.i);
-                if (i >= 0 && i < spFilaPlanejada.length) spTocar({ uris: spFilaPlanejada.slice(i).map(t => t.uri) }, true);
+        function nxMenEscolher() {
+            if (!nxMen) return;
+            const it = nxMen.itens[nxMen.idx]; if (!it) return;
+            const { ed, tn, ini, fim, tipo } = nxMen;
+            nxMenFechar();
+            let id = it.id, titulo = it.titulo;
+            if (it.novo) {
+                const pai = _notaDoEditor(ed);
+                const nova = { id: 'note-' + Date.now(), parentId: pai || null, title: titulo, icon: 'fa-regular fa-file-lines', content: '<p></p>', expanded: true, createdAt: new Date().toISOString() };
+                state.notepad.push(nova);
+                id = nova.id;
+                renderNotepadTree();
             }
+            const sel = window.getSelection();
+            const r = document.createRange();
+            try { r.setStart(tn, ini); r.setEnd(tn, Math.min(fim, tn.nodeValue.length)); } catch (e) { return; }
+            sel.removeAllRanges(); sel.addRange(r);
+            const href = (tipo === 'note' ? '#nx-note:' : '#nx-task:') + id;
+            document.execCommand('insertHTML', false, `<a href="${escapeHtml(href)}">${tipo === 'task' ? '@' : ''}${escapeHtml(titulo)}</a>&nbsp;`);
+            onPaneInput(Number(ed.dataset.pane));
+            setTimeout(nxPainelAtualizar, 900);
+        }
+        document.addEventListener('input', e => {
+            const ed = e.target && e.target.closest && e.target.closest('.note-editor');
+            if (ed) nxMenDetectar(ed); else nxMenFechar();
+        });
+        document.addEventListener('keydown', e => {
+            if (!nxMen) return;
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault(); e.stopPropagation();
+                const n = nxMen.itens.length;
+                nxMen.idx = (nxMen.idx + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+                nxMenPintar();
+            } else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); nxMenEscolher(); }
+            else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); nxMenFechar(); }
+        }, true);
+        document.addEventListener('mousedown', e => { if (nxMen && !nxMenBox.contains(e.target)) nxMenFechar(); });
+
+        /* ---------------- Datas e recorrencia ---------------- */
+        function _isoLocal(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+        function _dataIso(iso) { const p = String(iso || '').split('-').map(Number); return p.length === 3 && p[0] ? new Date(p[0], p[1] - 1, p[2]) : null; }
+        function _hoje0() { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }
+        function textoRecorrencia(r) {
+            if (!r || !r.freq) return '';
+            const n = Math.max(1, parseInt(r.interval, 10) || 1);
+            if (r.freq === 'weekday') return 'Dias úteis';
+            const nomes = { day: ['Todo dia', 'dias'], week: ['Toda semana', 'semanas'], month: ['Todo mês', 'meses'], year: ['Todo ano', 'anos'] }[r.freq];
+            if (!nomes) return '';
+            if (r.freq === 'week' && n === 2) return 'A cada 2 semanas (quinzenal)';
+            return n === 1 ? nomes[0] : `A cada ${n} ${nomes[1]}`;
+        }
+        function _passoRecorrencia(d, r) {
+            const n = Math.max(1, parseInt(r.interval, 10) || 1);
+            const x = new Date(d);
+            if (r.freq === 'day') x.setDate(x.getDate() + n);
+            else if (r.freq === 'weekday') { do { x.setDate(x.getDate() + 1); } while (x.getDay() === 0 || x.getDay() === 6); }
+            else if (r.freq === 'week') x.setDate(x.getDate() + 7 * n);
+            else if (r.freq === 'month') {
+                const dia = d.getDate(); x.setDate(1); x.setMonth(x.getMonth() + n);
+                x.setDate(Math.min(dia, new Date(x.getFullYear(), x.getMonth() + 1, 0).getDate()));
+            } else if (r.freq === 'year') x.setFullYear(x.getFullYear() + n);
+            else x.setDate(x.getDate() + 1);
+            return x;
+        }
+        function proximaOcorrencia(iso, r) {
+            const hoje = _hoje0();
+            let d = _passoRecorrencia(_dataIso(iso) || hoje, r);
+            for (let i = 0; d < hoje && i < 500; i++) d = _passoRecorrencia(d, r);   // concluida atrasada: pula ate hoje
+            return _isoLocal(d);
+        }
+        /* Chamado em todo saveState: qualquer caminho que conclua a tarefa (lista,
+           kanban, quadro da pagina, lote, slider) gera a proxima ocorrencia. */
+        function processarRecorrencias() {
+            let criou = false;
+            const hojeIso = _isoLocal(new Date());
+            for (const t of state.tasks.slice()) {
+                if (!t || !t.recurrence || !t.recurrence.freq || t.recurNext || (Number(t.progress) || 0) < 100) continue;
+                const nova = JSON.parse(JSON.stringify(t));
+                nova.id = 'task-' + Date.now() + '-' + Math.floor(Math.random() * 100000);
+                nova.progress = 0;
+                nova.steps = (nova.steps || []).map((st, i) => ({ ...st, id: 'step-' + Date.now() + '-' + i, completed: false }));
+                nova.dueDate = proximaOcorrencia(t.dueDate, t.recurrence);
+                nova.createdAt = new Date().toISOString();
+                nova.isMyDay = nova.dueDate === hojeIso;
+                delete nova.recurNext;
+                t.recurNext = nova.id;
+                const idx = state.tasks.indexOf(t);
+                state.tasks.splice(idx < 0 ? 0 : idx, 0, nova);
+                criou = true;
+                showToast(`Tarefa recorrente: próxima em ${formatDateBR(nova.dueDate)}`);
+            }
+            return criou;
+        }
+        function nxSyncRecDrawer(t) {
+            const f = document.getElementById('detailTaskRecFreq'), i = document.getElementById('detailTaskRecInt'), b = document.getElementById('detailTaskRecIntBox');
+            if (!f) return;
+            const r = t && t.recurrence;
+            f.value = (r && r.freq) || '';
+            if (i) i.value = (r && r.interval) || 1;
+            if (b) b.classList.toggle('hidden', !r || r.freq === 'weekday');
+        }
+        function nxRenderRecorrentes() {
+            const box = document.getElementById('nx-rec-lista'); if (!box) return;
+            const lista = state.tasks.filter(t => t.recurrence && t.recurrence.freq && (Number(t.progress) || 0) < 100)
+                .sort((a, b) => String(a.dueDate || '9').localeCompare(String(b.dueDate || '9')));
+            box.innerHTML = lista.length ? lista.map(t => {
+                const pj = t.projectId && state.projects.find(p => p.id === t.projectId);
+                const sub = [textoRecorrencia(t.recurrence), t.dueDate ? 'próxima ' + formatDateBR(t.dueDate) : '', pj ? pj.name : ''].filter(Boolean).join(' · ');
+                return nxItem('fa-solid fa-rotate', t.title || '', escapeHtml(sub), `onclick="openTaskFromNotif('${escapeJsStr(t.id)}')"`);
+            }).join('') : '<div class="nx-empty">Nenhuma tarefa recorrente ainda.</div>';
         }
 
-        async function spListarPlaylists() {
-            const el = document.getElementById('sp-lista');
-            if (!el || spTab !== 'playlists') return;
-            el.innerHTML = '<div class="sp-note" style="padding:8px">Carregando playlists...</div>';
-            const r = await spChamar('GET', '/v1/me/playlists?limit=50');
-            if (!spOk(r)) { el.innerHTML = `<div class="sp-err" style="margin:8px">${escapeHtml(spMsgErro(r))}</div>`; return; }
-            const itens = ((r.data && r.data.items) || []).filter(p => p && spIdOk(p.id) && spUriOk(p.uri));
-            spPls = itens; spPlsT = Date.now();
-            if (!itens.length) { el.innerHTML = '<div class="sp-note" style="padding:8px">Nenhuma playlist na sua biblioteca.</div>'; return; }
-            el.innerHTML = itens.map(p => {
-                const total = (p.items && p.items.total != null) ? p.items.total : (p.tracks && p.tracks.total);
-                const meu = spMe && p.owner && p.owner.id === spMe.id;
-                const listavel = meu || p.collaborative;
-                return spLinha({
-                    act: listavel ? 'open-pl' : 'play-ctx', uri: p.uri, id: p.id, name: p.name,
-                    img: p.images && p.images[p.images.length > 1 ? 1 : 0] && (p.images[p.images.length > 1 ? 1 : 0].url),
-                    titulo: p.name, sub: ((p.owner && p.owner.display_name) || '') + (total != null ? ' · ' + total + ' faixas' : ''),
-                    play: listavel ? { act: 'play-ctx', uri: p.uri } : null,
-                    atual: spState && spState.context === p.uri
-                });
+        /* ---------------- Captura rapida (texto natural) ---------------- */
+        const NX_DIAS = { domingo: 0, segunda: 1, terca: 2, quarta: 3, quinta: 4, sexta: 5, sabado: 6 };
+        function _proxDiaSemana(dow) { const d = _hoje0(); while (d.getDay() !== dow) d.setDate(d.getDate() + 1); return d; }
+        function nxParseCapture(bruto) {
+            let txt = ' ' + String(bruto || '').replace(/\s+/g, ' ').trim() + ' ';
+            const r = { title: '', dueDate: '', projectId: null, priority: null, recurrence: null };
+            const hoje = _hoje0();
+            const mais = n => { const d = new Date(hoje); d.setDate(d.getDate() + n); return d; };
+            const W = w => new RegExp('(?<=\\s)(?:' + w + ')(?=[\\s,.;!?])', 'i');
+            const tirar = (re, fn) => { const m = txt.match(re); if (m && fn(m) !== false) txt = txt.replace(m[0], ' '); return !!m; };
+            const DIA = '(segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo)(?:-feira)?';
+            const diaN = s => NX_DIAS[_norm(s).replace('-feira', '')];
+
+            // #projeto (so remove do titulo se achar o projeto)
+            txt = txt.replace(/(?<=\s)#([^\s#!]+)/g, (m0, nome) => {
+                const q = _norm(nome).replace(/[\s\-_]/g, '');
+                const p = state.projects.find(p => _norm(p.name).replace(/[\s\-_]/g, '') === q)
+                    || state.projects.find(p => _norm(p.name).replace(/[\s\-_]/g, '').includes(q));
+                if (!p) return m0;
+                r.projectId = p.id; return ' ';
+            });
+            tirar(W('!(urgente|alta|m[ée]dia|baixa)'), m => { r.priority = { urgente: 'Urgente', alta: 'Alta', media: 'Média', baixa: 'Baixa' }[_norm(m[1])]; });
+
+            // Recorrencia
+            tirar(W('todos os dias|todo dia|diariamente'), () => { r.recurrence = { freq: 'day', interval: 1 }; });
+            tirar(W('dias [úu]teis'), () => { r.recurrence = { freq: 'weekday', interval: 1 }; });
+            tirar(W('(?:toda|todo|todas as|todos os) ' + DIA + 's?'), m => { r.recurrence = { freq: 'week', interval: 1 }; r.dueDate = _isoLocal(_proxDiaSemana(diaN(m[1]))); });
+            tirar(W('toda semana|semanalmente'), () => { r.recurrence = { freq: 'week', interval: 1 }; });
+            tirar(W('quinzenalmente|a cada quinze dias'), () => { r.recurrence = { freq: 'week', interval: 2 }; });
+            tirar(W('todo m[êe]s|mensalmente'), () => { r.recurrence = { freq: 'month', interval: 1 }; });
+            tirar(W('todo ano|anualmente'), () => { r.recurrence = { freq: 'year', interval: 1 }; });
+            tirar(W('a cada (\\d{1,2}) (dias?|semanas?|m[êe]s|meses|anos?)'), m => {
+                const u = _norm(m[2]); r.recurrence = { freq: u.startsWith('dia') ? 'day' : u.startsWith('sem') ? 'week' : u.startsWith('m') ? 'month' : 'year', interval: Number(m[1]) };
+            });
+
+            // Datas
+            if (!r.dueDate) {
+                tirar(W('depois de amanh[ãa]'), () => { r.dueDate = _isoLocal(mais(2)); })
+                || tirar(W('amanh[ãa]'), () => { r.dueDate = _isoLocal(mais(1)); })
+                || tirar(W('hoje'), () => { r.dueDate = _isoLocal(hoje); })
+                || tirar(W('pr[óo]xima semana|semana que vem'), () => { r.dueDate = _isoLocal(mais(7)); })
+                || tirar(W('em (\\d{1,3}) dias?'), m => { r.dueDate = _isoLocal(mais(Number(m[1]))); })
+                || tirar(W('(\\d{1,2})/(\\d{1,2})(?:/(\\d{2,4}))?'), m => {
+                    const dd = Number(m[1]), mm = Number(m[2]); let aa = m[3] ? Number(m[3]) : hoje.getFullYear();
+                    if (aa < 100) aa += 2000;
+                    if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return false;
+                    let d = new Date(aa, mm - 1, dd);
+                    if (!m[3] && d < hoje) d = new Date(aa + 1, mm - 1, dd);
+                    r.dueDate = _isoLocal(d);
+                })
+                || tirar(W('(?:na |no |nesta |nessa |pr[óo]xima |pr[óo]ximo |at[ée] )' + DIA), m => { r.dueDate = _isoLocal(_proxDiaSemana(diaN(m[1]))); })
+                || tirar(new RegExp('(?<=\\s)' + DIA + '(?=\\s*$)', 'i'), m => { r.dueDate = _isoLocal(_proxDiaSemana(diaN(m[1]))); });   // "sexta" no fim do texto
+            }
+            if (r.recurrence && !r.dueDate) r.dueDate = _isoLocal(hoje);
+            r.title = txt.replace(/\s+/g, ' ').trim().replace(/^[-–,;:]+\s*/, '');
+            return r;
+        }
+        function nxCriarDaCaptura(texto) {
+            const r = nxParseCapture(texto);
+            if (!r.title) return null;
+            const hojeIso = _isoLocal(new Date());
+            const t = {
+                id: 'task-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+                title: r.title.slice(0, 300), notes: '',
+                categoryId: (state.categories[0] && state.categories[0].id) || null,
+                projectId: r.projectId, priority: r.priority || 'Média', progress: 0,
+                isStarred: false, isMyDay: r.dueDate === hojeIso, dueDate: r.dueDate,
+                steps: [], links: [], attachments: [], createdAt: new Date().toISOString()
+            };
+            if (r.recurrence) t.recurrence = r.recurrence;
+            state.tasks.unshift(t);
+            saveState(true, true);
+            renderAll();
+            return t;
+        }
+        function nxResumoTarefa(t) {
+            const pj = t.projectId && state.projects.find(p => p.id === t.projectId);
+            return [t.dueDate ? formatDateBR(t.dueDate) : '', pj ? pj.name : '', t.priority !== 'Média' ? t.priority : '', t.recurrence ? textoRecorrencia(t.recurrence) : ''].filter(Boolean).join(' · ');
+        }
+        // Chamado pela janelinha do Ctrl+Alt+N (via Python). Devolve o texto de confirmacao.
+        window.nxQuickAdd = function (texto) {
+            if (typeof isLoadedFromDisk !== 'undefined' && !isLoadedFromDisk) return '';
+            const t = nxCriarDaCaptura(texto);
+            if (!t) return '';
+            const res = nxResumoTarefa(t);
+            showToast('Tarefa criada pela captura rápida: ' + t.title);
+            return 'Criada: ' + t.title + (res ? ' — ' + res : '');
+        };
+        function nxCapturaPreview() {
+            const i = document.getElementById('nx-cap-input'), box = document.getElementById('nx-cap-prev');
+            if (!i || !box) return;
+            if (!i.value.trim()) { box.innerHTML = ''; return; }
+            const r = nxParseCapture(i.value);
+            const pj = r.projectId && state.projects.find(p => p.id === r.projectId);
+            const chips = [r.title ? '“' + r.title + '”' : '', r.dueDate ? '📅 ' + formatDateBR(r.dueDate) : '', pj ? '📁 ' + pj.name : '',
+                r.priority ? '🚩 ' + r.priority : '', r.recurrence ? '🔁 ' + textoRecorrencia(r.recurrence) : ''].filter(Boolean);
+            box.innerHTML = chips.map(c => `<span class="nx-chip">${escapeHtml(c)}</span>`).join('');
+        }
+        function nxCapturaCriar() {
+            const i = document.getElementById('nx-cap-input'); if (!i) return;
+            const t = nxCriarDaCaptura(i.value);
+            if (!t) { showToast('Escreva o título da tarefa.'); return; }
+            i.value = ''; nxCapturaPreview();
+            const res = nxResumoTarefa(t);
+            showToast('Tarefa criada' + (res ? ': ' + res : '.'));
+        }
+        async function nxCapturaStatus() {
+            const el = document.getElementById('nx-cap-status'); if (!el) return;
+            try {
+                const st = await window.pywebview.api.quick_capture_status();
+                el.innerHTML = st && st.status === 'ok'
+                    ? '<b>Ctrl+Alt+N</b> abre a captura rápida de qualquer programa do Windows.'
+                    : 'O atalho Ctrl+Alt+N não está disponível (outro programa pode estar usando).';
+            } catch (e) { el.textContent = ''; }
+        }
+        document.addEventListener('input', e => { if (e.target && e.target.id === 'nx-cap-input') nxCapturaPreview(); });
+        document.addEventListener('keydown', e => {
+            if (e.target && e.target.id === 'nx-cap-input' && e.key === 'Enter') { e.preventDefault(); nxCapturaCriar(); }
+        });
+
+        /* ---------------- Modelos ---------------- */
+        // O usuario monta o modelo do zero: tarefas com prazo relativo ao inicio, ou as secoes de uma pagina.
+        let nxTplUsando = null;
+        let nxTplRasc = null;   // rascunho do modelo que esta sendo criado/editado
+        const NX_TPL_PRIOS = ['Baixa', 'Média', 'Alta', 'Urgente'];
+        function nxTodosModelos() { return state.templates || []; }
+        function nxTplTarefaVazia(offset) { return { title: '', offset: offset === undefined ? '' : offset, priority: 'Média', steps: '' }; }
+        function nxSecoesDoHtml(html) {
+            const d = document.createElement('div'); d.innerHTML = html || '';
+            return Array.from(d.querySelectorAll('h1,h2,h3')).map(h => h.textContent.trim()).filter(Boolean).join('\n');
+        }
+        function nxTplNovo(kind) {
+            nxTplRasc = { id: null, kind: kind || 'project', name: '', tasks: [nxTplTarefaVazia(0)], secoes: '', comData: true, comTarefas: false };
+            nxRenderEditorModelo();
+            nxTplFoco('#nx-tpl-r-nome');
+        }
+        function nxTplEditar(id) {
+            const m = nxTodosModelos().find(x => x.id === id); if (!m) return;
+            const legado = m.kind === 'note' && m.secoes === undefined;
+            nxTplRasc = { id: m.id, kind: m.kind, name: m.name || '', icon: m.icon,
+                tasks: (m.tasks || []).map(t => ({ title: t.title || '', offset: (t.offset === null || t.offset === undefined) ? '' : t.offset,
+                    priority: t.priority || 'Média', steps: (t.steps || []).join('; '), notes: t.notes || '', categoryId: t.categoryId || null, recurrence: t.recurrence })),
+                secoes: legado ? nxSecoesDoHtml(m.content) : (m.secoes || ''),
+                comData: legado ? String(m.content || '').includes('{data}') : !!m.comData,
+                comTarefas: legado ? String(m.content || '').includes('data-nx-tasks') : !!m.comTarefas };
+            if (legado) nxTplRasc.legado = { content: m.content, secoes: nxTplRasc.secoes, comData: nxTplRasc.comData, comTarefas: nxTplRasc.comTarefas };
+            if (nxTplRasc.kind === 'project' && !nxTplRasc.tasks.length) nxTplRasc.tasks.push(nxTplTarefaVazia(0));
+            nxRenderEditorModelo();
+            nxTplFoco('#nx-tpl-r-nome');
+        }
+        function nxTplFoco(sel) { setTimeout(() => { const i = document.querySelector(sel); if (i) i.focus(); }, 30); }
+        function nxTplTipo(k) {
+            if (!nxTplRasc) return;
+            nxTplRasc.kind = k;
+            if (k === 'project' && !nxTplRasc.tasks.length) nxTplRasc.tasks.push(nxTplTarefaVazia(0));
+            nxRenderEditorModelo();
+        }
+        function nxTplAddTarefa() {
+            const ts = nxTplRasc.tasks;
+            const ult = ts.length ? parseInt(ts[ts.length - 1].offset, 10) : NaN;
+            ts.push(nxTplTarefaVazia(isNaN(ult) ? '' : ult + 1));
+            nxRenderEditorModelo();
+            nxTplFoco('.nx-tpl-row:last-child .nx-tpl-tit');
+        }
+        function nxTplRemTarefa(i) {
+            nxTplRasc.tasks.splice(i, 1);
+            if (!nxTplRasc.tasks.length) nxTplRasc.tasks.push(nxTplTarefaVazia(0));
+            nxRenderEditorModelo();
+        }
+        function nxTplCancelar() { nxTplRasc = null; nxRenderEditorModelo(); }
+        function nxRenderEditorModelo() {
+            const box = document.getElementById('nx-tpl-editor'), novo = document.getElementById('nx-tpl-novo');
+            if (!box) return;
+            if (!nxTplRasc) { box.innerHTML = ''; box.style.display = 'none'; if (novo) novo.style.display = ''; return; }
+            if (novo) novo.style.display = 'none';
+            box.style.display = '';
+            const r = nxTplRasc, proj = r.kind === 'project';
+            const tipo = `<div class="nx-seg"><button class="${proj ? 'on' : ''}" onclick="nxTplTipo('project')"><i class="fa-solid fa-folder-tree"></i> Projeto</button><button class="${proj ? '' : 'on'}" onclick="nxTplTipo('note')"><i class="fa-regular fa-file-lines"></i> Página</button></div>`;
+            const nome = `<input class="nx-in" id="nx-tpl-r-nome" maxlength="80" value="${escapeHtml(r.name)}" placeholder="${proj ? 'Nome do modelo (ex: Mudança de casa)' : 'Nome do modelo (ex: Diário de leitura)'}" oninput="nxTplRasc.name=this.value">`;
+            let corpo;
+            if (proj) {
+                corpo = `<div class="nx-lbl">Tarefas</div><div class="nx-tpl-rows">` + r.tasks.map((t, i) => `<div class="nx-tpl-row">
+                        <input class="nx-in nx-tpl-tit" maxlength="200" value="${escapeHtml(t.title)}" placeholder="Tarefa ${i + 1}" oninput="nxTplRasc.tasks[${i}].title=this.value">
+                        <div class="nx-tpl-meta">
+                            <label title="Dias depois da data de início escolhida ao usar o modelo">Dia <input class="nx-in" type="number" min="0" max="3650" value="${escapeHtml(String(t.offset))}" placeholder="—" oninput="nxTplRasc.tasks[${i}].offset=this.value"></label>
+                            <select class="nx-in" onchange="nxTplRasc.tasks[${i}].priority=this.value">${NX_TPL_PRIOS.map(pr => `<option value="${pr}" ${pr === t.priority ? 'selected' : ''}>${pr}</option>`).join('')}</select>
+                            <button class="del" title="Remover tarefa" onclick="nxTplRemTarefa(${i})"><i class="fa-solid fa-xmark"></i></button>
+                        </div>
+                        <input class="nx-in nx-tpl-steps" maxlength="500" value="${escapeHtml(t.steps)}" placeholder="Etapas (opcional, separe por ;)" oninput="nxTplRasc.tasks[${i}].steps=this.value">
+                    </div>`).join('') + `</div>
+                    <button class="nx-wide" onclick="nxTplAddTarefa()"><i class="fa-solid fa-plus"></i> Adicionar tarefa</button>
+                    <div class="nx-tip"><b>Dia</b> conta a partir da data de início que você escolhe ao usar o modelo (0 = no próprio dia). Em branco = sem prazo.</div>`;
+            } else {
+                corpo = `<div class="nx-lbl">Seções da página</div>
+                    <textarea class="nx-in" id="nx-tpl-r-sec" rows="5" maxlength="2000" placeholder="Uma seção por linha&#10;ex: Livro&#10;Trechos marcantes&#10;O que aprendi" oninput="nxTplRasc.secoes=this.value">${escapeHtml(r.secoes)}</textarea>
+                    <label class="nx-chk"><input type="checkbox" ${r.comData ? 'checked' : ''} onchange="nxTplRasc.comData=this.checked"> Data de criação no topo</label>
+                    <label class="nx-chk"><input type="checkbox" ${r.comTarefas ? 'checked' : ''} onchange="nxTplRasc.comTarefas=this.checked"> Bloco de tarefas no fim</label>`;
+            }
+            box.innerHTML = `<div class="nx-lbl" style="margin-top:0">${r.id ? 'Editar modelo' : 'Novo modelo'}</div>` + tipo + nome + corpo
+                + `<div class="nx-row2"><button class="nx-wide nx-primary" onclick="nxTplSalvar()">Salvar modelo</button><button class="nx-wide" onclick="nxTplCancelar()">Cancelar</button></div>`;
+        }
+        function nxTplSalvar() {
+            const r = nxTplRasc; if (!r) return;
+            const nome = String(r.name || '').trim().slice(0, 80);
+            if (!nome) { showToast('Dê um nome ao modelo.'); nxTplFoco('#nx-tpl-r-nome'); return; }
+            let m;
+            if (r.kind === 'project') {
+                const tarefas = r.tasks.map(t => {
+                    const off = String(t.offset === undefined ? '' : t.offset).trim();
+                    const n = parseInt(off, 10);
+                    const x = { title: String(t.title || '').trim().slice(0, 200),
+                        offset: (off === '' || isNaN(n)) ? null : Math.max(0, Math.min(3650, n)),
+                        priority: NX_TPL_PRIOS.includes(t.priority) ? t.priority : 'Média',
+                        steps: String(t.steps || '').split(';').map(z => z.trim()).filter(Boolean).slice(0, 50),
+                        notes: t.notes || '', categoryId: t.categoryId || null };
+                    if (t.recurrence) x.recurrence = t.recurrence;
+                    return x;
+                }).filter(t => t.title);
+                if (!tarefas.length) { showToast('Adicione pelo menos uma tarefa.'); nxTplFoco('.nx-tpl-tit'); return; }
+                m = { kind: 'project', name: nome, icon: r.icon || 'fa-solid fa-folder-tree', tasks: tarefas };
+            } else {
+                const secoes = String(r.secoes || '').split('\n').map(z => z.trim()).filter(Boolean).slice(0, 40);
+                if (!secoes.length && !r.comTarefas) { showToast('Escreva pelo menos uma seção.'); nxTplFoco('#nx-tpl-r-sec'); return; }
+                const L = r.legado;
+                const igual = L && L.secoes === r.secoes && L.comData === r.comData && L.comTarefas === r.comTarefas;
+                const content = igual ? L.content : (r.comData ? '<p><b>Data:</b> {data}</p>' : '')
+                    + secoes.map(z => `<h2>${escapeHtml(z)}</h2><p><br></p>`).join('')
+                    + (r.comTarefas ? '<h2>Tarefas</h2><div data-nx-tasks="1"></div><p><br></p>' : '');
+                m = { kind: 'note', name: nome, icon: r.icon || 'fa-regular fa-file-lines', secoes: secoes.join('\n'), comData: !!r.comData, comTarefas: !!r.comTarefas, content };
+            }
+            if (!Array.isArray(state.templates)) state.templates = [];
+            const idx = r.id ? state.templates.findIndex(x => x.id === r.id) : -1;
+            if (idx >= 0) {
+                const antigo = state.templates[idx];
+                const novo = Object.assign({ id: antigo.id, createdAt: antigo.createdAt }, m, { updatedAt: new Date().toISOString() });
+                state.templates[idx] = novo;
+            } else state.templates.push(Object.assign({ id: 'tpl-' + Date.now(), createdAt: new Date().toISOString() }, m));
+            nxTplRasc = null;
+            saveState(true, true);
+            nxRenderEditorModelo();
+            nxRenderModelos();
+            showToast((idx >= 0 ? 'Modelo atualizado: ' : 'Modelo criado: ') + nome);
+        }
+        function nxRenderModelos() {
+            const box = document.getElementById('nx-tpl-lista'); if (!box) return;
+            if (box.querySelector('.nx-tpl-form input:focus')) return;   // nao atropela o formulario aberto
+            const lista = nxTodosModelos();
+            if (!lista.length) { box.innerHTML = '<div class="nx-empty">Nenhum modelo ainda. Clique em <b>Criar modelo</b> para montar o primeiro.</div>'; return; }
+            const hoje = _isoLocal(new Date());
+            box.innerHTML = lista.map(m => {
+                const sub = m.kind === 'project' ? `Projeto · ${(m.tasks || []).length} tarefas` : 'Página do Vault';
+                const linha = `<div class="nx-item" style="cursor:default"><i class="${escapeHtml(m.icon || (m.kind === 'project' ? 'fa-solid fa-folder-tree' : 'fa-regular fa-file-lines'))}"></i>
+                    <span class="t">${escapeHtml(m.name)}<span class="s">${sub}</span></span>
+                    <span class="acts"><button onclick="nxUsarModelo('${escapeJsStr(m.id)}')">Usar</button><button title="Editar modelo" onclick="nxTplEditar('${escapeJsStr(m.id)}')"><i class="fa-solid fa-pen"></i></button><button class="del" title="Excluir modelo" onclick="nxExcluirModelo('${escapeJsStr(m.id)}')"><i class="fa-regular fa-trash-can"></i></button></span></div>`;
+                const form = (nxTplUsando === m.id && m.kind === 'project') ? `<div class="nx-tpl-form">
+                    <input class="nx-in" id="nx-tpl-nome" value="${escapeHtml(m.name)}" placeholder="Nome do novo projeto" maxlength="80">
+                    <label class="nx-tip">Começa em <input type="date" class="nx-in" id="nx-tpl-data" value="${hoje}"></label>
+                    <div class="nx-row2"><button class="nx-wide nx-primary" onclick="nxCriarDoModelo('${escapeJsStr(m.id)}')">Criar projeto</button><button class="nx-wide" onclick="nxTplUsando=null; nxRenderModelos()">Cancelar</button></div>
+                </div>` : '';
+                return linha + form;
             }).join('');
         }
-
-        async function spAbrirPlaylist(id, nome, uri, offset) {
-            const el = document.getElementById('sp-lista');
-            if (!el) return;
-            spPlAtual = { id, nome, uri };
-            if (!offset) el.innerHTML = `<div class="sp-voltar"><button type="button" onclick="spAba('playlists')" title="Voltar"><i class="fa-solid fa-arrow-left"></i></button><span>${escapeHtml(nome)}</span><button type="button" class="sp-smart" onclick="spSmartShuffle('${id}', '${escapeHtml(escapeJsStr(nome))}', '${uri}')" title="Smart Shuffle (aproximado): embaralha sem repetir artista em sequência e mistura músicas novas dos mesmos artistas"><i class="fa-solid fa-wand-magic-sparkles"></i></button><button type="button" onclick="spTocar({ context_uri: '${uri}' })" title="Tocar tudo"><i class="fa-solid fa-play"></i></button></div><div id="sp-faixas"><div class="sp-note" style="padding:8px">Carregando faixas...</div></div>`;
-            const r = await spChamar('GET', `/v1/playlists/${id}/items?limit=100&offset=${offset}`);
-            const box = document.getElementById('sp-faixas');
-            if (!box) return;
-            if (!spOk(r)) { box.innerHTML = `<div class="sp-err" style="margin:8px">${escapeHtml(spMsgErro(r))}</div>`; return; }
-            const data = r.data || {};
-            const faixas = (data.items || []).map(it => it && (it.item || it.track)).filter(t => t && typeof t === 'object' && spUriOk(t.uri));
-            const html = faixas.map(t => spLinha({
-                act: 'play-in', uri: t.uri, ctx: uri, titulo: t.name,
-                sub: (t.artists || []).map(a => a.name).join(', '),
-                img: t.album && t.album.images && t.album.images[t.album.images.length > 1 ? 1 : 0] && t.album.images[t.album.images.length > 1 ? 1 : 0].url,
-                atual: spState && spState.track && spState.track.uri === t.uri,
-                add: { uri: t.uri }
-            })).join('');
-            if (!offset) box.innerHTML = html || '<div class="sp-note" style="padding:8px">Playlist vazia.</div>';
-            else { const mais = document.getElementById('sp-mais'); if (mais) mais.remove(); box.insertAdjacentHTML('beforeend', html); }
-            if (data.next) box.insertAdjacentHTML('beforeend', `<button type="button" id="sp-mais" class="sp-btn ghost" onclick="spAbrirPlaylist('${id}', '${escapeHtml(escapeJsStr(nome))}', '${uri}', ${offset + 100})">Carregar mais</button>`);
+        function nxExcluirModelo(id) {
+            if (!confirm('Excluir este modelo? Os projetos e páginas já criados com ele não mudam.')) return;
+            state.templates = state.templates.filter(m => m.id !== id);
+            if (nxTplRasc && nxTplRasc.id === id) { nxTplRasc = null; nxRenderEditorModelo(); }
+            saveState(true, true);
+            nxRenderModelos();
+        }
+        function nxUsarModelo(id) {
+            const m = nxTodosModelos().find(x => x.id === id); if (!m) return;
+            if (m.kind === 'project') { nxTplUsando = id; nxRenderModelos(); setTimeout(() => { const i = document.getElementById('nx-tpl-nome'); if (i) { i.focus(); i.select(); } }, 30); return; }
+            const hoje = formatDateBR(_isoLocal(new Date()));
+            const nota = { id: 'note-' + Date.now(), parentId: null, title: m.name, icon: m.icon || 'fa-regular fa-file-lines',
+                content: sanitizarHtml(String(m.content || '<p></p>').split('{data}').join(hoje)), expanded: true, createdAt: new Date().toISOString() };
+            state.notepad.push(nota);
+            saveState(true, true);
+            if (appMode !== 'notepad') switchAppMode('notepad');
+            renderNotepadTree();
+            selectNote(nota.id);
+            showToast('Página criada a partir do modelo.');
+        }
+        function nxCriarDoModelo(id) {
+            const m = nxTodosModelos().find(x => x.id === id); if (!m) return;
+            const nome = ((document.getElementById('nx-tpl-nome') || {}).value || m.name).trim().slice(0, 80) || m.name;
+            const inicio = _dataIso((document.getElementById('nx-tpl-data') || {}).value) || _hoje0();
+            const proj = { id: 'proj-' + Date.now(), name: nome, icon: m.icon || 'fa-solid fa-folder-tree', color: '#4272c4' };
+            state.projects.push(proj);
+            const hojeIso = _isoLocal(new Date());
+            const agora = Date.now();
+            (m.tasks || []).forEach((x, i) => {
+                let due = '';
+                if (x.offset !== null && x.offset !== undefined) { const d = new Date(inicio); d.setDate(d.getDate() + Number(x.offset)); due = _isoLocal(d); }
+                const t = { id: 'task-' + agora + '-' + i, title: x.title, notes: x.notes || '', projectId: proj.id,
+                    categoryId: (x.categoryId && state.categories.some(c => c.id === x.categoryId)) ? x.categoryId : ((state.categories[0] && state.categories[0].id) || null),
+                    priority: x.priority || 'Média', progress: 0, isStarred: false, isMyDay: due === hojeIso, dueDate: due,
+                    steps: (x.steps || []).map((st, k) => ({ id: 'step-' + agora + '-' + i + '-' + k, title: st, completed: false })),
+                    links: [], attachments: [], createdAt: new Date().toISOString() };
+                if (x.recurrence) t.recurrence = x.recurrence;
+                state.tasks.push(t);
+            });
+            nxTplUsando = null;
+            saveState(true, true);
+            renderAll();
+            showToast(`Projeto "${nome}" criado com ${(m.tasks || []).length} tarefas.`);
         }
 
-        function spRenderBusca() {
-            const el = document.getElementById('sp-lista');
-            if (!el) return;
-            el.innerHTML = `<input id="sp-q" class="sp-input" placeholder="Buscar músicas, álbuns e playlists" spellcheck="false" autocomplete="off" oninput="spBuscaAgendar(this.value)"><div id="sp-res"></div>`;
-            const q = document.getElementById('sp-q'); if (q) q.focus();
-        }
-        function spBuscaAgendar(v) { clearTimeout(spBuscaT); spBuscaT = setTimeout(() => spBuscar(v), 450); }
-        async function spBuscar(v) {
-            const box = document.getElementById('sp-res');
-            if (!box) return;
-            v = String(v || '').trim();
-            if (v.length < 2) { box.innerHTML = ''; return; }
-            box.innerHTML = '<div class="sp-note" style="padding:8px">Buscando...</div>';
-            const r = await spChamar('GET', '/v1/search?q=' + encodeURIComponent(v) + '&type=track,album,playlist&limit=10');
-            if (!spOk(r)) { box.innerHTML = `<div class="sp-err" style="margin:8px">${escapeHtml(spMsgErro(r))}</div>`; return; }
-            const d = r.data || {};
-            const img = o => o && o.images && o.images[o.images.length > 1 ? 1 : 0] && o.images[o.images.length > 1 ? 1 : 0].url;
-            const tracks = ((d.tracks && d.tracks.items) || []).filter(t => t && spUriOk(t.uri));
-            const albums = ((d.albums && d.albums.items) || []).filter(a => a && spUriOk(a.uri));
-            const lists = ((d.playlists && d.playlists.items) || []).filter(p => p && spUriOk(p.uri));
-            let h = '';
-            if (tracks.length) h += '<div class="sp-sec">Músicas</div>' + tracks.map(t => spLinha({ act: 'play-track', uri: t.uri, add: { uri: t.uri }, titulo: t.name, sub: (t.artists || []).map(a => a.name).join(', '), img: img(t.album), atual: spState && spState.track && spState.track.uri === t.uri })).join('');
-            if (albums.length) h += '<div class="sp-sec">Álbuns</div>' + albums.map(a => spLinha({ act: 'play-ctx', uri: a.uri, titulo: a.name, sub: (a.artists || []).map(x => x.name).join(', '), img: img(a) })).join('');
-            if (lists.length) h += '<div class="sp-sec">Playlists</div>' + lists.map(p => spLinha({ act: 'play-ctx', uri: p.uri, titulo: p.name, sub: (p.owner && p.owner.display_name) || '', img: img(p) })).join('');
-            box.innerHTML = h || '<div class="sp-note" style="padding:8px">Nada encontrado.</div>';
-        }
-
-        function spMsgErro(r) {
-            if (!r) return 'Sem resposta do Spotify.';
-            if (r.status === 401) return 'Sessão expirada. Desconecte e conecte de novo.';
-            if (r.status === 403) return 'O Spotify recusou o acesso (403). Confira se o dono do app tem Premium e se a sua conta está em User Management.';
-            if (r.status === 429) return 'Muitas requisições ao Spotify. Aguarde ' + (r.retry || 'alguns') + ' segundos.';
-            if (r.status === 0) return r.message || 'Sem conexão com o Spotify.';
-            return 'Erro do Spotify (' + r.status + ').' + ((r.data && r.data.error && r.data.error.message) ? ' ' + r.data.error.message : '');
-        }
-
-        /* ---- player (iframe invisivel com o Web Playback SDK) ---- */
-        function spIniciarPlayer() {
-            const f = document.getElementById('sp-frame');
-            if (!f || f.dataset.on === '1' || !spInfo || !spInfo.playerUrl) return;
-            f.dataset.on = '1';
-            f.src = spInfo.playerUrl;
-            if (!window.__spMsg) { window.__spMsg = 1; window.addEventListener('message', spMensagem); }
-            if (!spTimer) spTimer = setInterval(spTick, 500);
-        }
-        function spCmd(cmd, v, ms) {
-            const f = document.getElementById('sp-frame');
-            if (!f || !f.contentWindow) return;
-            f.contentWindow.postMessage({ nxsp: 1, cmd, v, ms }, SP_ORIGEM);
-        }
-        function spMensagem(e) {
-            const f = document.getElementById('sp-frame');
-            if (!f || e.source !== f.contentWindow || e.origin !== SP_ORIGEM) return;
-            const m = e.data;
-            if (!m || !m.nxsp) return;
-            if (m.type === 'ready') { spDevice = String(m.device_id || ''); spAviso(''); }
-            else if (m.type === 'not_ready') { spDevice = ''; }
-            else if (m.type === 'state') { spState = m.state; spAtualizarNow(); }
-            else if (m.type === 'error') {
-                const k = m.kind;
-                spAviso(k === 'account_error' ? 'Esta conta não é Premium: o player embutido do Spotify exige Premium.'
-                    : k === 'authentication_error' ? 'Login do Spotify inválido ou expirado. Desconecte e conecte de novo.'
-                    : k === 'initialization_error' ? 'Este navegador embutido não suporta o player do Spotify (DRM): ' + (m.msg || '')
-                    : k === 'playback_error' ? 'Erro ao reproduzir: ' + (m.msg || '')
-                    : (m.msg || 'Erro no player do Spotify.'));
-            }
-        }
-        async function spTocar(corpo, manterFila) {
-            if (!manterFila) spFilaPlanejada = null;     // tocou outra coisa: a fila do Smart Shuffle nao vale mais
-            if (!spDevice) { spAviso('O player do NEXUS ainda está iniciando. Tente de novo em instantes.'); spIniciarPlayer(); return; }
-            spAviso('');
-            spCmd('activate');
-            // aplica a escolha de aleatorio ANTES de iniciar, para a playlist ja tocar embaralhada
-            if (spShufflePref !== null) await spChamar('PUT', '/v1/me/player/shuffle?state=' + spShufflePref + '&device_id=' + encodeURIComponent(spDevice));
-            const r = await spChamar('PUT', '/v1/me/player/play?device_id=' + encodeURIComponent(spDevice), corpo);
-            if (!spOk(r)) {
-                spAviso(r.status === 404 ? 'O Spotify não achou o player do NEXUS. Feche e abra o painel para recriá-lo.'
-                    : r.status === 403 ? 'O Spotify recusou a reprodução (conta sem Premium ou item indisponível).'
-                    : spMsgErro(r));
-            }
-        }
-
-        function spShuffleAtivo() { return spShufflePref !== null ? spShufflePref : !!(spState && spState.shuffle); }
-        function spShuffleBotao() {
-            const b = document.getElementById('sp-shuf');
-            if (!b) return;
-            const on = spShuffleAtivo();
-            b.classList.toggle('on', on);
-            b.title = on ? 'Aleatório: ligado' : 'Aleatório: desligado';
-        }
-        async function spShuffle() {
-            const novo = !spShuffleAtivo();
-            spShufflePref = novo;
-            spShuffleBotao();
-            if (!spDevice) return;      // sem player ainda: vale a partir da proxima musica que tocar
-            const r = await spChamar('PUT', '/v1/me/player/shuffle?state=' + novo + '&device_id=' + encodeURIComponent(spDevice));
-            if (!spOk(r) && r.status !== 404) { spShufflePref = !novo; spShuffleBotao(); spAviso(spMsgErro(r)); }
-        }
-
-        /* ---- Smart Shuffle (aproximado) ----
-           O Smart Shuffle oficial do Spotify nao existe na API. Esta versao: (1) embaralha a
-           playlist sem repetir o mesmo artista em sequencia e (2) intercala musicas NOVAS
-           (fora da playlist) de artistas que voce ja tem nela. Toca ate 100 faixas por vez e
-           guarda a ordem montada em spFilaPlanejada, mostrada na aba Fila. */
-        const SP_SMART_MAX = 100;
-        let spFilaPlanejada = null, spFilaInicio = 0, spUltimaFila = '', spFilaT = 0;
-        function spEmbaralhar(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
-        function spEspacarArtistas(faixas) {
-            const resto = faixas.slice(), saida = [];
-            while (resto.length) {
-                const recentes = saida.slice(-3).map(t => t.artist);
-                let i = resto.findIndex(t => !recentes.includes(t.artist));
-                if (i < 0) i = 0;
-                saida.push(resto.splice(i, 1)[0]);
-            }
-            return saida;
-        }
-        const spCapa = o => { const im = o && o.images; return im && im[im.length > 1 ? 1 : 0] ? im[im.length > 1 ? 1 : 0].url : ''; };
-        let spSmartOcupado = false;
-        async function spSmartShuffle(id, nome, uri) {
-            if (spSmartOcupado) return;
-            if (!spDevice) { spAviso('O player ainda está iniciando. Tente de novo em instantes.'); spIniciarPlayer(); return; }
-            spSmartOcupado = true;
-            try {
-                spAviso('Montando o Smart Shuffle...', true);
-                const todas = [];
-                for (let pg = 0, off = 0; pg < 4; pg++, off += 100) {
-                    const r = await spChamar('GET', `/v1/playlists/${id}/items?limit=100&offset=${off}`);
-                    if (!spOk(r)) { spAviso(spMsgErro(r)); return; }
-                    ((r.data && r.data.items) || []).forEach(it => {
-                        const t = it && (it.item || it.track);
-                        if (t && typeof t === 'object' && String(t.uri).startsWith('spotify:track:') && spUriOk(t.uri)) {
-                            const ids = (t.artists || []).map(a => a && a.id).filter(spIdOk);
-                            todas.push({ uri: t.uri, artist: ids[0] || t.uri, ids, name: t.name, sub: (t.artists || []).map(a => a.name).join(', '), img: spCapa(t.album), nova: false });
-                        }
-                    });
-                    if (!(r.data && r.data.next)) break;
+        /* ---------------- Detalhes da tarefa: chips, prazo e barra ---------------- */
+        function nxDtBarra() { const r = document.getElementById('detailTaskProgress'); if (r) r.style.setProperty('--p', (Number(r.value) || 0) + '%'); }
+        function nxDtDecor(t) {
+            if (!t) return;
+            const pj = t.projectId && state.projects.find(p => p.id === t.projectId);
+            const dot = document.getElementById('detailProjDot');
+            if (dot) dot.style.background = (pj && pj.color) || '#4272c4';
+            const pc = document.getElementById('detailProjChip'); if (pc) pc.classList.toggle('vazio', !pj);
+            const prc = document.getElementById('detailPrioChip'); if (prc) prc.dataset.p = t.priority || 'Média';
+            const dd = document.getElementById('detailTaskDueDate');
+            if (dd) {
+                dd.classList.remove('atr', 'hoje', 'amanha');
+                if (t.dueDate && (Number(t.progress) || 0) < 100) {
+                    const d = calculateDaysDiff(t.dueDate, getTodayDateStr());
+                    if (d < 0) dd.classList.add('atr'); else if (d === 0) dd.classList.add('hoje'); else if (d === 1) dd.classList.add('amanha');
                 }
-                if (todas.length < 3) { spAviso('A playlist precisa de pelo menos 3 músicas para o Smart Shuffle.'); return; }
-                const base = spEspacarArtistas(spEmbaralhar(todas.slice()));
-
-                // descobertas: uma faixa nova (fora da playlist) de artistas que ja estao nela
-                const conhecidas = new Set(todas.map(t => t.uri));
-                const artistas = spEmbaralhar([...new Set(todas.flatMap(t => t.ids))]);
-                const alvo = Math.min(10, Math.max(2, Math.round(base.length / 8)));
-                const novas = [];
-                for (const aid of artistas) {
-                    if (novas.length >= alvo) break;
-                    const ra = await spChamar('GET', `/v1/artists/${aid}/albums?include_groups=album,single&limit=10`);
-                    if (!spOk(ra)) { if (ra.status === 429) break; continue; }
-                    const albs = ((ra.data && ra.data.items) || []).filter(a => a && spIdOk(a.id));
-                    if (!albs.length) continue;
-                    const alb = albs[Math.floor(Math.random() * albs.length)];
-                    const rt = await spChamar('GET', `/v1/albums/${alb.id}/tracks?limit=20`);
-                    if (!spOk(rt)) continue;
-                    const cand = ((rt.data && rt.data.items) || []).filter(t => t && String(t.uri).startsWith('spotify:track:') && spUriOk(t.uri) && !conhecidas.has(t.uri) && !novas.some(n => n.uri === t.uri));
-                    if (cand.length) {
-                        const t = cand[Math.floor(Math.random() * cand.length)];
-                        novas.push({ uri: t.uri, name: t.name, sub: (t.artists || []).map(a => a.name).join(', '), img: spCapa(alb), nova: true });
-                    }
-                }
-
-                // intercala: 1 descoberta a cada ~4 faixas (a primeira so a partir da 4a)
-                const fila = base.slice(0, Math.max(1, SP_SMART_MAX - novas.length));
-                novas.forEach((n, i) => fila.splice(Math.min(fila.length, 3 + i * 5), 0, n));
-
-                // desliga o shuffle do Spotify: a ordem montada aqui e que vale
-                spShufflePref = false; spShuffleBotao();
-                await spChamar('PUT', '/v1/me/player/shuffle?state=false&device_id=' + encodeURIComponent(spDevice));
-                spCmd('activate');
-                const rp = await spChamar('PUT', '/v1/me/player/play?device_id=' + encodeURIComponent(spDevice), { uris: fila.map(t => t.uri) });
-                if (spOk(rp)) {
-                    spFilaPlanejada = fila; spFilaInicio = Date.now(); spUltimaFila = '';
-                    spAviso(`Smart Shuffle: ${fila.length - novas.length} músicas da playlist + ${novas.length} descobertas.`, true);
-                    spAba('fila');
-                } else spAviso(spMsgErro(rp));
-            } finally { spSmartOcupado = false; }
-        }
-
-        /* ---- Fila de reproducao ---- */
-        async function spRenderFila() {
-            const el = document.getElementById('sp-lista');
-            if (!el || spTab !== 'fila') return;
-            const atual = spState && spState.track ? spState.track.uri : '';
-            const cab = '<div class="sp-voltar"><span>Fila de reprodução</span><button type="button" onclick="spRenderFila()" title="Atualizar"><i class="fa-solid fa-rotate-right"></i></button></div>';
-            let idx = -1;
-            if (spFilaPlanejada) {
-                idx = spFilaPlanejada.findIndex(t => t.uri === atual);
-                if (idx < 0 && Date.now() - spFilaInicio < 8000) idx = 0;      // o player ainda nao informou a faixa
             }
-            if (idx >= 0) {
-                const f = spFilaPlanejada;
-                const linha = (t, i, tocando) => spLinha({
-                    act: tocando ? '' : 'fila-play', i: String(i), titulo: t.name, sub: t.sub, img: t.img, atual: tocando,
-                    badge: t.nova ? 'Descoberta' : '', add: spUriOk(t.uri) ? { uri: t.uri } : null
-                });
-                const depois = f.slice(idx + 1);
-                el.innerHTML = cab +
-                    '<div class="sp-sec">Tocando agora</div>' + linha(f[idx], idx, true) +
-                    `<div class="sp-sec">A seguir · Smart Shuffle (${depois.length})</div>` +
-                    (depois.map((t, k) => linha(t, idx + 1 + k, false)).join('') || '<div class="sp-note" style="padding:8px">Fim da fila.</div>') +
-                    (idx > 0 ? `<div class="sp-note" style="padding:8px">${idx} música(s) já tocada(s) nesta fila.</div>` : '');
-                return;
-            }
-            el.innerHTML = cab + '<div class="sp-note" style="padding:8px">Carregando fila...</div>';
-            const r = await spChamar('GET', '/v1/me/player/queue');
-            if (spTab !== 'fila') return;
-            if (!spOk(r)) { el.innerHTML = cab + `<div class="sp-err" style="margin:8px">${escapeHtml(spMsgErro(r))}</div>`; return; }
-            const d = r.data || {};
-            const tr = t => t && spUriOk(t.uri) ? spLinha({
-                act: '', titulo: t.name, sub: (t.artists || []).map(a => a.name).join(', '), img: spCapa(t.album),
-                add: String(t.uri).startsWith('spotify:track:') ? { uri: t.uri } : null
-            }) : '';
-            const prox = (d.queue || []).map(tr).join('');
-            el.innerHTML = cab + (d.currently_playing ? '<div class="sp-sec">Tocando agora</div>' + tr(d.currently_playing) : '') +
-                '<div class="sp-sec">A seguir (fila do Spotify)</div>' +
-                (prox || '<div class="sp-note" style="padding:8px">A fila está vazia.</div>') +
-                '<div class="sp-note" style="padding:8px">O Spotify mostra só as próximas músicas da fila. Use o Smart Shuffle para ver a ordem completa.</div>';
+            nxDtBarra();
+            const crescer = () => ['detailTaskTitle', 'detailTaskNotes'].forEach(id => { const el = document.getElementById(id); if (el && el.offsetParent) autoGrow(el); });
+            crescer(); requestAnimationFrame(crescer); setTimeout(crescer, 80);
         }
+        (function () {
+            const _pd = populateDrawer;
+            populateDrawer = function (t) { _pd(t); try { nxDtDecor(t); } catch (e) { } };
+            const _ud = updateTaskFromDrawer;
+            updateTaskFromDrawer = function () { _ud.apply(this, arguments); try { nxDtDecor(state.tasks.find(x => x.id === selectedTaskId)); } catch (e) { } };
+            const _up = updateProgressFromDrawer;
+            updateProgressFromDrawer = function (v) { _up(v); nxDtBarra(); };
+        })();
 
-        /* ---- Adicionar musica a uma playlist ---- */
-        let spPls = null, spPlsT = 0, spPickUri = '';
-        const spEscrevivel = p => p && ((spMe && p.owner && p.owner.id === spMe.id) || p.collaborative);
-        async function spCarregarPls(forcar) {
-            if (!forcar && spPls && Date.now() - spPlsT < 60000) return spPls;
-            const r = await spChamar('GET', '/v1/me/playlists?limit=50');
-            if (spOk(r)) { spPls = ((r.data && r.data.items) || []).filter(p => p && spIdOk(p.id) && spUriOk(p.uri)); spPlsT = Date.now(); }
-            return spPls || [];
+        /* ---------------- Tarefas ao lado do Vault (split view) ---------------- */
+        // Guardado no layout do editor (por usuario): aberto, filtro escolhido por pagina, mostrar concluidas.
+        function nxVtCfg() {
+            const L = ensureLayout();
+            if (!L.tarefas || typeof L.tarefas !== 'object') L.tarefas = { aberto: false, porNota: {}, feitas: false };
+            if (!L.tarefas.porNota || typeof L.tarefas.porNota !== 'object') L.tarefas.porNota = {};
+            return L.tarefas;
         }
-        async function spAbrirPicker(uri) {
-            if (!spUriOk(uri) || !String(uri).startsWith('spotify:track:')) return;
-            if (spInfo && spInfo.reauth) { spAviso('Para adicionar músicas a playlists, reautorize a conta (botão azul acima da lista).'); return; }
-            spPickUri = uri;
-            const box = document.getElementById('sp-picker');
-            box.classList.remove('hidden');
-            box.innerHTML = '<div class="sp-pick"><div class="sp-note" style="margin:6px">Carregando suas playlists...</div></div>';
-            const pls = (await spCarregarPls()).filter(spEscrevivel);
-            box.innerHTML = `<div class="sp-pick">
-                <div class="sp-voltar"><span>Adicionar a qual playlist?</span><button type="button" onclick="spFecharPicker()" title="Fechar"><i class="fa-solid fa-xmark"></i></button></div>
-                <div class="sp-row" data-act="nova" onclick="spClick(this)"><div class="sp-cover" style="display:flex;align-items:center;justify-content:center"><i class="fa-solid fa-plus"></i></div><div class="sp-r-t"><div class="sp-r-n">Nova playlist...</div></div></div>
-                ${pls.map(p => spLinha({ act: 'pick', id: p.id, name: p.name, img: spCapa(p), titulo: p.name, sub: ((p.items && p.items.total != null) ? p.items.total : (p.tracks && p.tracks.total)) + ' faixas' })).join('')}
-                ${pls.length ? '' : '<div class="sp-note" style="margin:8px">Você ainda não tem playlists editáveis.</div>'}
+        function nxVtNota() { return selectedNoteId && state.notepad.find(n => n.id === selectedNoteId); }
+        function nxVtTarefasDaPagina(nota) {
+            if (!nota) return [];
+            const ids = new Set(state.tasks.filter(t => t.noteId === nota.id).map(t => t.id));
+            try { nxCitadosPor(nota).tarefas.forEach(t => ids.add(t.id)); } catch (e) { }
+            return state.tasks.filter(t => ids.has(t.id));
+        }
+        function nxVtFiltro(nota) {
+            const c = nxVtCfg();
+            const esc = nota && c.porNota[nota.id];
+            if (esc === 'all' || esc === 'page' || (esc && state.projects.some(p => p.id === esc))) return esc;
+            // automatico: o projeto mais presente nas tarefas da pagina
+            const daPag = nxVtTarefasDaPagina(nota);
+            const cont = {};
+            daPag.forEach(t => { if (t.projectId && state.projects.some(p => p.id === t.projectId)) cont[t.projectId] = (cont[t.projectId] || 0) + 1; });
+            const top = Object.keys(cont).sort((a, b) => cont[b] - cont[a])[0];
+            if (top) return top;
+            return daPag.length ? 'page' : 'all';
+        }
+        function nxToggleTarefasVault(forcar) {
+            const c = nxVtCfg();
+            c.aberto = typeof forcar === 'boolean' ? forcar : !c.aberto;
+            saveState(false);
+            nxRenderTarefasVault();
+        }
+        function nxVtEscolher(v) { const n = nxVtNota(); if (n) nxVtCfg().porNota[n.id] = v; saveState(false); nxRenderTarefasVault(); }
+        function nxVtFeitas() { const c = nxVtCfg(); c.feitas = !c.feitas; saveState(false); nxRenderTarefasVault(); }
+        function nxVtLinha(t, nota) {
+            const feita = (Number(t.progress) || 0) >= 100;
+            const sub = [];
+            if (t.dueDate) {
+                const d = calculateDaysDiff(t.dueDate, getTodayDateStr());
+                if (feita) sub.push(`<span>${formatDateBR(t.dueDate)}</span>`);
+                else if (d < 0) sub.push(`<span class="r">${nxTextoAtraso(-d)}</span>`);
+                else if (d === 0) sub.push('<span class="r">Hoje</span>');
+                else if (d === 1) sub.push('<span class="a">Amanhã</span>');
+                else sub.push(`<span>${formatDateBR(t.dueDate)}</span>`);
+            }
+            const st = Array.isArray(t.steps) ? t.steps : [];
+            if (st.length) sub.push(`<span>${st.filter(x => x.completed).length}/${st.length}</span>`);
+            const pj = t.projectId && state.projects.find(p => p.id === t.projectId);
+            const f = nxVtFiltro(nota);
+            if (pj && (f === 'all' || f === 'page')) sub.push(`<span><i class="fa-solid fa-circle" style="color:${escapeHtml(pj.color || '#4272c4')}"></i>${escapeHtml(pj.name)}</span>`);
+            const nt = t.noteId && t.noteId !== (nota && nota.id) && state.notepad.find(n => n.id === t.noteId);
+            if (nt) sub.push(`<span><i class="fa-solid fa-link"></i>${escapeHtml(nt.title || 'Página')}</span>`);
+            if (t.recurrence) sub.push('<span><i class="fa-solid fa-rotate"></i>Repete</span>');
+            const id = escapeJsStr(t.id);
+            return `<div class="nx-vt-row ${feita ? 'feita' : ''}" data-task-id="${escapeHtml(t.id)}">
+                <button class="nx-vt-ck" onclick="event.stopPropagation(); toggleTaskCompletion('${id}')" title="${feita ? 'Reabrir tarefa' : 'Concluir tarefa'}">${feita ? '<i class="fa-solid fa-check"></i>' : ''}</button>
+                <div class="nx-vt-tx" onclick="openTaskPeek('${id}')"><div class="tt">${escapeHtml(t.title)}</div>${sub.length ? `<div class="st">${sub.join('')}</div>` : ''}</div>
+                <button class="nx-vt-star ${t.isStarred ? 'on' : ''}" onclick="event.stopPropagation(); toggleTaskStar('${id}')" title="Favoritar"><i class="${t.isStarred ? 'fa-solid' : 'fa-regular'} fa-star"></i></button>
             </div>`;
         }
-        function spFecharPicker() { const b = document.getElementById('sp-picker'); if (b) { b.classList.add('hidden'); b.innerHTML = ''; } }
-        async function spAdicionar(id, nome) {
-            const uri = spPickUri;
-            spFecharPicker();
-            if (!spIdOk(id) || !uri) return;
-            const r = await spChamar('POST', `/v1/playlists/${id}/items`, { uris: [uri] });
-            if (spOk(r)) {
-                spPlsT = 0;
-                spAviso(`Adicionada a "${nome}".`, true);
-                if (spPlAtual && spPlAtual.id === id && spTab === 'playlists') spAbrirPlaylist(id, spPlAtual.nome, spPlAtual.uri, 0);
-            } else if (r.status === 403 || r.status === 401) {
-                spAviso('O Spotify recusou. Reautorize a conta para liberar a edição de playlists (e só playlists suas ou colaborativas aceitam músicas).');
-            } else spAviso(spMsgErro(r));
-        }
-        async function spNovaPlaylist() {
-            const nome = (prompt('Nome da nova playlist:') || '').trim();
-            if (!nome) return;
-            const r = await spChamar('POST', '/v1/me/playlists', { name: nome, public: false });
-            if (spOk(r) && r.data && spIdOk(r.data.id)) { spPlsT = 0; await spAdicionar(r.data.id, nome); }
-            else { spFecharPicker(); spAviso(spMsgErro(r)); }
-        }
-        function spAdicionarAtual() {
-            const t = spState && spState.track;
-            if (!t) { spAviso('Nenhuma música tocando agora.'); return; }
-            spAbrirPicker(t.uri);
-        }
-
-        function spAtualizarNow() {
-            spShuffleBotao();
-            {
-                const cur = spState && spState.track ? spState.track.uri : '';
-                if (spTab === 'fila' && cur !== spUltimaFila) { spUltimaFila = cur; clearTimeout(spFilaT); spFilaT = setTimeout(spRenderFila, 400); }
+        function nxRenderTarefasVault() {
+            const box = document.getElementById('nx-vtasks'); if (!box) return;
+            const c = nxVtCfg();
+            const btn = document.getElementById('nt-tasks-btn'); if (btn) btn.classList.toggle('nx-on', !!c.aberto);
+            if (!c.aberto) { box.style.display = 'none'; return; }
+            box.style.display = 'flex';
+            const nota = nxVtNota();
+            const f = nxVtFiltro(nota);
+            const sel = document.getElementById('nx-vt-proj');
+            if (sel && document.activeElement !== sel) {
+                sel.innerHTML = '<option value="page">Desta página</option><option value="all">Todos os projetos</option>'
+                    + state.projects.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+                sel.value = f;
             }
-            const t = spState && spState.track;
-            const img = document.getElementById('sp-np-img');
-            const src = t ? spImg(t.image) : '';
-            if (img) { if (src) { img.src = src; img.style.visibility = 'visible'; } else { img.removeAttribute('src'); img.style.visibility = 'hidden'; } }
-            document.getElementById('sp-np-title').textContent = t ? t.name : 'Nada tocando';
-            document.getElementById('sp-np-art').textContent = t ? (t.artists || []).join(', ') : '';
-            const pp = document.querySelector('#sp-pp i');
-            if (pp) pp.className = 'fa-solid ' + (spState && !spState.paused ? 'fa-pause' : 'fa-play');
-            document.getElementById('sp-t1').textContent = spFmt(spState && spState.duration);
-            spTick();
+            const lista = f === 'all' ? state.tasks.slice() : f === 'page' ? nxVtTarefasDaPagina(nota) : state.tasks.filter(t => t.projectId === f);
+            const pront = t => (Number(t.progress) || 0) >= 100;
+            const abertas = lista.filter(t => !pront(t)).sort((a, b) => (a.dueDate || '9999').localeCompare(b.dueDate || '9999') || ((b.isStarred ? 1 : 0) - (a.isStarred ? 1 : 0)));
+            const feitas = lista.filter(pront);
+            const mostrar = c.feitas ? abertas.concat(feitas) : abertas;
+            const el = document.getElementById('nx-vt-list');
+            el.innerHTML = mostrar.length ? mostrar.map(t => nxVtLinha(t, nota)).join('')
+                : `<div class="nx-vt-empty">${f === 'page' ? 'Nenhuma tarefa nesta página.<br>Crie uma acima ou use o Quadro de tarefas.' : 'Nenhuma tarefa pendente aqui.'}</div>`;
+            const fb = document.getElementById('nx-vt-feitas');
+            if (fb) { fb.style.display = feitas.length ? '' : 'none'; fb.textContent = c.feitas ? 'Ocultar concluídas' : `Mostrar concluídas (${feitas.length})`; }
         }
-        function spTick() {
-            if (!spState || !spState.track || spSeeking) return;
-            let pos = spState.position || 0;
-            if (!spState.paused && spState.ts) pos += Math.max(0, Date.now() - spState.ts);
-            pos = Math.min(pos, spState.duration || pos);
-            const r = document.getElementById('sp-seek');
-            if (r) r.value = spState.duration ? Math.round(pos / spState.duration * 1000) : 0;
-            document.getElementById('sp-t0').textContent = spFmt(pos);
+        document.addEventListener('keydown', e => {
+            if (!(e.target && e.target.id === 'nx-vt-input' && e.key === 'Enter')) return;
+            e.preventDefault();
+            const v = e.target.value.trim(); if (!v) return;
+            const nota = nxVtNota(), f = nxVtFiltro(nota);
+            const t = nxCriarDaCaptura(v); if (!t) return;
+            if (!t.projectId && f !== 'all' && f !== 'page') t.projectId = f;
+            if (f === 'page' && nota) t.noteId = nota.id;
+            saveState(true, true);
+            renderAll();
+            e.target.value = '';
+            e.target.focus();
+        });
+        (function () {
+            const _ra = renderAll; renderAll = function () { const r = _ra.apply(this, arguments); try { nxRenderTarefasVault(); } catch (e) { } return r; };
+            const _rh = refreshNoteHeader; refreshNoteHeader = function () { const r = _rh.apply(this, arguments); try { nxRenderTarefasVault(); } catch (e) { } return r; };
+        })();
+
+        /* ---------------- Motion ao concluir tarefa ---------------- */
+        const nxConcluindo = new Set();
+        function nxMotionConcluir(btn) {
+            const r = btn.getBoundingClientRect();
+            const camada = document.createElement('div');
+            camada.className = 'nx-burst';
+            camada.style.left = (r.left + r.width / 2) + 'px';
+            camada.style.top = (r.top + r.height / 2) + 'px';
+            const cores = ['#34d399', '#7aa7f0', '#a78bfa', '#fbbf24'];
+            let h = '<span class="ring"></span><span class="chk"><i class="fa-solid fa-check"></i></span>';
+            for (let i = 0; i < 10; i++) {
+                const a = (i / 10) * Math.PI * 2 + Math.random() * 0.4, d = 18 + Math.random() * 14;
+                h += `<span class="pt" style="--x:${(Math.cos(a) * d).toFixed(1)}px;--y:${(Math.sin(a) * d).toFixed(1)}px;background:${cores[i % 4]}"></span>`;
+            }
+            camada.innerHTML = h;
+            document.body.appendChild(camada);
+            setTimeout(() => camada.remove(), 800);
         }
-        function spSeekInput(v) {
-            spSeeking = true;
-            if (spState && spState.duration) document.getElementById('sp-t0').textContent = spFmt(v / 1000 * spState.duration);
+        (function () {
+            const _orig = toggleTaskCompletion;
+            toggleTaskCompletion = function (taskId) {
+                if (nxConcluindo.has(taskId)) return;          // clique duplo durante a animacao
+                const t = state.tasks.find(x => x.id === taskId);
+                const ev = window.event;
+                const btn = ev && ev.target && ev.target.closest ? ev.target.closest('button, [data-nx-act]') : null;
+                const reduzir = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+                if (!t || (Number(t.progress) || 0) >= 100 || !btn || reduzir) { _orig(taskId); return; }
+                nxConcluindo.add(taskId);
+                nxMotionConcluir(btn);
+                const linha = btn.closest('.notion-card, .nx-vt-row, .nx-tb-row, .nx-ni, .nx-item, [data-task-id]');
+                if (linha) linha.classList.add('nx-concluindo');
+                setTimeout(() => { nxConcluindo.delete(taskId); _orig(taskId); }, 470);
+            };
+        })();
+
+        /* ---------------- Linha do tempo (Gantt leve) ---------------- */
+        let tlDiaW = 28;
+        function abrirTimeline() {
+            const sel = document.getElementById('tl-proj');
+            const atual = sel.value;
+            sel.innerHTML = '<option value="">Todos os projetos</option>' + state.projects.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('')
+                + '<option value="__sem">Sem projeto</option>';
+            sel.value = [...sel.options].some(o => o.value === atual) ? atual : '';
+            document.getElementById('timelineModal').classList.remove('hidden');
+            renderTimeline();
+            setTimeout(tlHoje, 30);
         }
-        function spSeekFim(v) {
-            if (spState && spState.duration) spCmd('seek', undefined, Math.round(v / 1000 * spState.duration));
-            setTimeout(() => { spSeeking = false; }, 400);
+        function fecharTimeline() { document.getElementById('timelineModal').classList.add('hidden'); }
+        function tlZoom(dir) { tlDiaW = Math.max(12, Math.min(64, tlDiaW + dir * 8)); renderTimeline(); setTimeout(tlHoje, 10); }
+        function tlHoje() {
+            const b = document.getElementById('tl-body'), h = b && b.querySelector('.tl-hoje');
+            if (b && h) b.scrollLeft = Math.max(0, h.offsetLeft + 260 - b.clientWidth / 3);
         }
+        function renderTimeline() {
+            const body = document.getElementById('tl-body'), foot = document.getElementById('tl-foot');
+            const pid = document.getElementById('tl-proj').value;
+            const verFeitas = document.getElementById('tl-done').checked;
+            const hoje = _hoje0();
+            let tarefas = state.tasks.filter(t => (pid === '' || (pid === '__sem' ? !t.projectId : t.projectId === pid)) && (verFeitas || (Number(t.progress) || 0) < 100));
+            const semData = tarefas.filter(t => !_dataIso(t.dueDate)).length;
+            tarefas = tarefas.filter(t => _dataIso(t.dueDate));
+            if (!tarefas.length) {
+                body.innerHTML = '<div class="nx-empty" style="padding:30px">Nenhuma tarefa com data limite neste filtro.</div>';
+                foot.textContent = semData ? `${semData} tarefa(s) sem data limite não aparecem.` : '';
+                return;
+            }
+            const DIA = 86400000;
+            const ini = d => { const c = _dataIso(String(d || '').split('T')[0]); return c || null; };
+            let minD = new Date(Math.min(hoje, ...tarefas.map(t => _dataIso(t.dueDate))));
+            let maxD = new Date(Math.max(hoje, ...tarefas.map(t => _dataIso(t.dueDate))));
+            const S = new Date(minD); S.setDate(S.getDate() - 7);
+            const E = new Date(maxD); E.setDate(E.getDate() + 14);
+            const dias = Math.round((E - S) / DIA) + 1;
+            const W = dias * tlDiaW;
+            const pos = d => Math.round((d - S) / DIA) * tlDiaW;
+            const MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+            let fundo = '', cab = '';
+            for (let i = 0; i < dias; i++) {
+                const d = new Date(S); d.setDate(d.getDate() + i);
+                const x = i * tlDiaW, fds = d.getDay() === 0 || d.getDay() === 6;
+                fundo += `<div class="tl-day ${fds ? 'fds' : ''}" style="left:${x}px;width:${tlDiaW}px"></div>`;
+                if (tlDiaW >= 18 || d.getDay() === 1) cab += `<div class="tl-dn ${+d === +hoje ? 'hj' : ''}" style="left:${x}px;width:${tlDiaW}px">${d.getDate()}</div>`;
+                if (d.getDate() === 1 || i === 0) cab += `<div class="tl-mes" style="left:${x + 4}px">${MESES[d.getMonth()]} ${d.getFullYear()}</div>`;
+            }
+            const hojeX = pos(hoje) + Math.floor(tlDiaW / 2);
+            const trilha = conteudo => `<div class="tl-track" style="width:${W}px">${fundo}<div class="tl-hoje" style="left:${hojeX}px"></div>${conteudo}</div>`;
+            const grupos = [];
+            if (pid === '') {
+                const porProj = new Map();
+                tarefas.forEach(t => { const k = t.projectId && state.projects.some(p => p.id === t.projectId) ? t.projectId : ''; if (!porProj.has(k)) porProj.set(k, []); porProj.get(k).push(t); });
+                state.projects.forEach(p => { if (porProj.has(p.id)) grupos.push({ nome: p.name, itens: porProj.get(p.id) }); });
+                if (porProj.has('')) grupos.push({ nome: 'Sem projeto', itens: porProj.get('') });
+            } else grupos.push({ nome: null, itens: tarefas });
+            let linhas = `<div class="tl-row tl-head"><div class="tl-lab">Tarefa</div><div class="tl-track" style="width:${W}px">${cab}</div></div>`;
+            grupos.forEach(g => {
+                if (g.nome) linhas += `<div class="tl-row grp"><div class="tl-lab"><span>${escapeHtml(g.nome)}</span></div>${trilha('')}</div>`;
+                g.itens.sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate))).forEach(t => {
+                    const fim = _dataIso(t.dueDate);
+                    let comeco = ini(t.createdAt) || fim;
+                    if (comeco > fim) comeco = fim;
+                    if (comeco < S) comeco = S;
+                    const feita = (Number(t.progress) || 0) >= 100;
+                    const cls = feita ? 'ok' : (fim < hoje ? 'atr' : '');
+                    const left = pos(comeco), largura = pos(fim) - left + tlDiaW;
+                    const bar = `<div class="tl-bar ${cls}" data-id="${escapeHtml(t.id)}" style="left:${left}px;width:${largura}px" title="Prazo ${formatDateBR(t.dueDate)} - arraste para reagendar">${formatDateBR(t.dueDate).slice(0, 5)}</div>`;
+                    linhas += `<div class="tl-row"><div class="tl-lab" onclick="openTaskPeek('${escapeJsStr(t.id)}')" title="${escapeHtml(t.title || '')}"><i class="${feita ? 'fa-solid fa-circle-check text-emerald-400' : 'fa-regular fa-circle text-gray-500'}"></i><span>${escapeHtml(t.title || '')}</span></div>${trilha(bar)}</div>`;
+                });
+            });
+            body.innerHTML = `<div class="tl-grid" style="width:${W + 260}px">${linhas}</div>`;
+            const atrasadas = tarefas.filter(t => (Number(t.progress) || 0) < 100 && _dataIso(t.dueDate) < hoje).length;
+            foot.textContent = `${tarefas.length} tarefa(s) · ${atrasadas} atrasada(s)` + (semData ? ` · ${semData} sem data limite não aparecem` : '') + ' · arraste a barra para mudar o prazo';
+        }
+        // Arrastar a barra muda o prazo (um dia por coluna).
+        document.addEventListener('pointerdown', e => {
+            const bar = e.target.closest && e.target.closest('.tl-bar');
+            if (!bar) return;
+            e.preventDefault();
+            const x0 = e.clientX, w0 = bar.offsetWidth;
+            bar.classList.add('drag'); bar.setPointerCapture(e.pointerId);
+            const t = state.tasks.find(x => x.id === bar.dataset.id);
+            let delta = 0;
+            const mv = ev => {
+                delta = Math.round((ev.clientX - x0) / tlDiaW);
+                bar.style.width = Math.max(tlDiaW, w0 + delta * tlDiaW) + 'px';
+                if (t) { const d = _dataIso(t.dueDate); d.setDate(d.getDate() + delta); bar.textContent = formatDateBR(_isoLocal(d)).slice(0, 5); }
+            };
+            const up = () => {
+                bar.removeEventListener('pointermove', mv); bar.removeEventListener('pointerup', up); bar.removeEventListener('pointercancel', up);
+                bar.classList.remove('drag');
+                if (t && delta) {
+                    const d = _dataIso(t.dueDate); d.setDate(d.getDate() + delta);
+                    t.dueDate = _isoLocal(d);
+                    saveState(true, true); renderAll();
+                    showToast('Prazo alterado para ' + formatDateBR(t.dueDate));
+                }
+                renderTimeline();
+            };
+            bar.addEventListener('pointermove', mv); bar.addEventListener('pointerup', up); bar.addEventListener('pointercancel', up);
+        });
+        document.addEventListener('keydown', e => {
+            if (e.key !== 'Escape') return;
+            if (!document.getElementById('timelineModal').classList.contains('hidden')) fecharTimeline();
+            else if (nxPainel && !nxMen) nxFecharPainel();
+        });
+        window.addEventListener('resize', () => {
+            const pop = document.getElementById('nx-sidepanel');
+            if (pop && !pop.classList.contains('hidden')) pop.style.maxHeight = (window.innerHeight - parseInt(pop.style.top || 56, 10) - 16) + 'px';
+        });
 
         /* ---------------- Menu lateral recolhivel ---------------- */
         function toggleSidebar(forcar) {
@@ -5344,6 +5620,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     state.editorLayout = parsed.editorLayout;
                 }
                 if (parsed.uiMode === 'notepad' || parsed.uiMode === 'tasks') state.uiMode = parsed.uiMode;
+                if (Array.isArray(parsed.templates)) state.templates = parsed.templates;
             }
         }
 
@@ -5480,6 +5757,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 console.warn("Salvamento bloqueado: o aplicativo ainda está lendo o banco do disco.");
                 return;
             }
+            try { if (processarRecorrencias()) setTimeout(renderAll, 0); } catch (e) { console.warn('Recorrencia:', e); }
             if (saveStateTimeout) clearTimeout(saveStateTimeout);
             if (immediate) {
                 executeDiskSave(showVisualIndicator);
@@ -5909,7 +6187,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                             ${t.priority ? `<span class="text-[10px] px-1.5 py-0.5 rounded border font-semibold whitespace-nowrap ${prioColor}">${t.priority}</span>` : ''}
                             ${cat ? `<span class="text-[10px] bg-white/5 text-gray-400 px-1.5 py-0.5 rounded border border-white/5 max-w-[45%] truncate whitespace-nowrap" title="${escapeHtml(cat.name)}"><i class="${cat.icon || 'fa-regular fa-folder'} mr-1 text-[9px]"></i>${escapeHtml(cat.name)}</span>` : ''}
                             ${proj ? `<span class="text-[10px] bg-sky-500/10 text-sky-300 px-1.5 py-0.5 rounded border border-sky-500/20 max-w-[45%] truncate whitespace-nowrap" title="${escapeHtml(proj.name)}"><i class="${proj.icon || 'fa-solid fa-folder-tree'} mr-1 text-[9px]"></i>${escapeHtml(proj.name)}</span>` : ''}
-                            ${t.dueDate ? `<span class="text-[10px] text-gray-400 bg-white/5 px-1.5 py-0.5 rounded border border-white/5 whitespace-nowrap"><i class="fa-regular fa-calendar mr-1"></i>${formatDateBR(t.dueDate)}</span>` : ''}
+                            ${t.dueDate ? `<span class="text-[10px] text-gray-400 bg-white/5 px-1.5 py-0.5 rounded border border-white/5 whitespace-nowrap"><i class="fa-regular fa-calendar mr-1"></i>${formatDateBR(t.dueDate)}${t.recurrence ? '<i class="fa-solid fa-rotate ml-1 text-sky-400" title="Recorrente"></i>' : ''}</span>` : ''}
                             ${(() => { const nt = t.noteId && state.notepad.find(n => n.id === t.noteId); return nt ? `<span onclick="abrirNotaDaTarefa('${nt.id}')" class="text-[10px] text-sky-300 bg-sky-500/10 px-1.5 py-0.5 rounded border border-sky-500/20 max-w-[45%] truncate whitespace-nowrap cursor-pointer hover:text-white" title="Abrir no Vault: ${escapeHtml(nt.title || '')}"><i class="fa-solid fa-book-bookmark mr-1 text-[9px]"></i>${escapeHtml(nt.title || 'Nota')}</span>` : ''; })()}
                             ${atts.length > 0 ? `<span class="text-[10px] text-sky-300 bg-sky-500/10 px-1.5 py-0.5 rounded border border-sky-500/20 whitespace-nowrap" title="${escapeHtml(atts.map(a => a.name).join(', '))}"><i class="fa-solid fa-paperclip mr-1"></i>${atts.length} · ${formatarTamanho(atts.reduce((s,a)=>s+(Number(a.size)||0),0))}</span>` : ''}
                             ${t.notes ? `<i class="fa-regular fa-note-sticky text-gray-500 text-xs" title="Possui anotações"></i>` : ''}
@@ -5967,7 +6245,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 t.priority ? `<span class="text-[10px] px-1.5 py-0.5 rounded border font-semibold ${prioColor} max-w-full truncate">${t.priority}</span>` : '',
                 cat ? `<span class="text-[10px] bg-white/5 text-gray-400 px-1.5 py-0.5 rounded border border-white/10 max-w-full truncate"><i class="${cat.icon || 'fa-regular fa-folder'} mr-1 text-[9px]"></i>${escapeHtml(cat.name)}</span>` : '',
                 proj ? `<span class="text-[10px] bg-sky-500/10 text-sky-300 px-1.5 py-0.5 rounded border border-sky-500/20 max-w-full truncate"><i class="${proj.icon || 'fa-solid fa-folder-tree'} mr-1 text-[9px]"></i>${escapeHtml(proj.name)}</span>` : '',
-                t.dueDate ? `<span class="text-[10px] text-gray-400 bg-white/5 px-1.5 py-0.5 rounded border border-white/10 whitespace-nowrap"><i class="fa-regular fa-calendar mr-1"></i>${formatDateBR(t.dueDate)}</span>` : '',
+                t.dueDate ? `<span class="text-[10px] text-gray-400 bg-white/5 px-1.5 py-0.5 rounded border border-white/10 whitespace-nowrap"><i class="fa-regular fa-calendar mr-1"></i>${formatDateBR(t.dueDate)}${t.recurrence ? '<i class="fa-solid fa-rotate ml-1 text-sky-400" title="Recorrente"></i>' : ''}</span>` : '',
                 atts.length > 0 ? `<span class="text-[10px] text-sky-300 bg-sky-500/10 px-1.5 py-0.5 rounded border border-sky-500/20 whitespace-nowrap" title="${escapeHtml(atts.map(a => a.name).join(', '))}"><i class="fa-solid fa-paperclip mr-1"></i>${atts.length} · ${formatarTamanho(atts.reduce((s,a)=>s+(Number(a.size)||0),0))}</span>` : '',
                 `<button onclick="toggleTaskMyDay('${t.id}')" class="text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap transition cursor-pointer ${t.isMyDay !== false ? 'text-amber-300 bg-amber-500/10 border-amber-500/20 hover:bg-amber-500/20' : 'text-gray-500 bg-white/5 border-white/10 hover:text-amber-300'}" title="${t.isMyDay !== false ? 'Remover do Meu Dia' : 'Adicionar ao Meu Dia'}"><i class="fa-regular fa-sun"></i></button>`,
             ].filter(Boolean).join('');
@@ -6607,6 +6885,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             document.getElementById('detailTaskNotes').value = t.notes || '';
             document.getElementById('detailTaskPriority').value = t.priority || 'Média';
             document.getElementById('detailTaskDueDate').value = t.dueDate || '';
+            nxSyncRecDrawer(t);
             document.getElementById('detailTaskProgress').value = Number(t.progress) || 0;
             document.getElementById('detailProgressLabel').innerText = `${Number(t.progress) || 0}%`;
             document.getElementById('detailCreatedAt').innerText = `Criado em: ${formatDateBR(t.createdAt?.split('T')[0])}`;
@@ -6636,17 +6915,13 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             const stepsDone = steps.filter(s => s.completed).length;
             document.getElementById('detailStepsProgress').innerText = `${stepsDone}/${steps.length}`;
             document.getElementById('detailStepsContainer').innerHTML = steps.map((s, idx) => `
-                <div class="flex items-center justify-between gap-2 p-1.5 bg-white/5 rounded">
-                    <div class="flex items-start gap-2 flex-1 min-w-0">
-                        <button onclick="toggleStepDirect('${t.id}', ${idx})" class="mt-1 w-3.5 h-3.5 flex-shrink-0 rounded border ${s.completed ? 'bg-[#4272c4] border-[#4272c4] text-white' : 'border-gray-600'} flex items-center justify-center text-[8px] cursor-pointer">
-                            ${s.completed ? '<i class="fa-solid fa-check"></i>' : ''}
-                        </button>
-                        <textarea rows="1" title="Clique para editar a etapa" oninput="autoGrow(this)"
-                               onchange="editStepFromDrawer(${idx}, this.value)"
-                               onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}else if(event.key==='Escape'){this.value=this.defaultValue;this.blur();}"
-                               class="step-edit flex-1 min-w-0 resize-none overflow-hidden bg-transparent border border-transparent hover:border-white/10 focus:border-white/25 focus:bg-white/5 rounded px-1 py-0.5 text-xs leading-snug focus:outline-none ${s.completed ? 'line-through text-gray-500' : 'text-gray-200'}">${escapeHtml(s.title)}</textarea>
-                    </div>
-                    <button onclick="removeStepFromDrawer(${idx})" class="text-gray-500 hover:text-rose-400 text-xs cursor-pointer"><i class="fa-regular fa-trash-can"></i></button>
+                <div class="nx-dt-step ${s.completed ? 'ok' : ''}">
+                    <button onclick="toggleStepDirect('${t.id}', ${idx})" class="cb" title="${s.completed ? 'Desmarcar' : 'Concluir etapa'}">${s.completed ? '<i class="fa-solid fa-check"></i>' : ''}</button>
+                    <textarea rows="1" title="Clique para editar a etapa" oninput="autoGrow(this)"
+                           onchange="editStepFromDrawer(${idx}, this.value)"
+                           onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}else if(event.key==='Escape'){this.value=this.defaultValue;this.blur();}"
+                           class="step-edit">${escapeHtml(s.title)}</textarea>
+                    <button onclick="removeStepFromDrawer(${idx})" class="rm" title="Remover etapa"><i class="fa-solid fa-xmark"></i></button>
                 </div>
             `).join('');
 
@@ -6783,6 +7058,14 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 t.projectId = document.getElementById('detailTaskProject').value || null;
                 t.priority = document.getElementById('detailTaskPriority').value;
                 t.dueDate = document.getElementById('detailTaskDueDate').value;
+                const rf = (document.getElementById('detailTaskRecFreq') || {}).value || '';
+                if (rf) {
+                    const ri = Math.max(1, Math.min(99, parseInt((document.getElementById('detailTaskRecInt') || {}).value, 10) || 1));
+                    t.recurrence = { freq: rf, interval: rf === 'weekday' ? 1 : ri };
+                    if (!t.dueDate) t.dueDate = _isoLocal(new Date());
+                    delete t.recurNext;
+                } else delete t.recurrence;
+                nxSyncRecDrawer(t);
                 saveState(true, true);
                 renderAll();
             }
@@ -7994,7 +8277,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             }
 
             if (totalBadge) {
-                totalBadge.innerText = `${totalAlerts} alerta(s)`;
+                totalBadge.innerText = String(totalAlerts);
             }
 
             // 2. Renderizar lista dentro do painel
@@ -8018,117 +8301,54 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 
                 todayTasks.forEach(item => {
                     if (forceNotify || !notifiedTaskIds.has(item.task.id)) {
-                        tasksToNotify.push({ task: item.task, type: 'today', label: 'Vence Hoje' });
+                        tasksToNotify.push({ task: item.task, type: 'today', diff: 0 });
                         notifiedTaskIds.add(item.task.id);
                     }
                 });
 
                 overdueTasks.slice(0, 2).forEach(item => {
                     if (forceNotify || !notifiedTaskIds.has(item.task.id)) {
-                        tasksToNotify.push({ task: item.task, type: 'overdue', label: `Atrasada (${item.status.label})` });
+                        tasksToNotify.push({ task: item.task, type: 'overdue', diff: item.status.diff });
                         notifiedTaskIds.add(item.task.id);
                     }
                 });
 
                 if (tasksToNotify.length > 0) {
+                    // Direto ao ponto: o Windows ja assina o aviso como NEXUS.
+                    const curto = v => { v = String(v || '').trim(); return v.length > 60 ? v.slice(0, 57) + '…' : v; };
                     if (tasksToNotify.length === 1) {
-                        const t = tasksToNotify[0].task;
-                        const titulo = tasksToNotify[0].type === 'today' 
-                            ? `NEXUS: Tarefa Vencendo Hoje!` 
-                            : `NEXUS: Tarefa Atrasada!`;
-                        const mensagem = `${t.title}\nData Limite: ${formatDateBR(t.dueDate)} | Prioridade: ${t.priority || 'Normal'}`;
-                        window.pywebview.api.send_desktop_notification(titulo, mensagem, true);
+                        const n = tasksToNotify[0];
+                        window.pywebview.api.send_desktop_notification(curto(n.task.title), n.type === 'today' ? 'Vence hoje' : nxTextoAtraso(n.diff), true);
                     } else {
-                        const titulo = `NEXUS: ${tasksToNotify.length} tarefas com prazo hoje ou atrasadas`;
-                        const resumo = tasksToNotify.map(n => `• ${n.task.title} (${n.label})`).slice(0, 3).join('\n');
-                        window.pywebview.api.send_desktop_notification(titulo, resumo, true);
+                        const nA = tasksToNotify.filter(n => n.type === 'overdue').length, nH = tasksToNotify.length - nA;
+                        const titulo = [nA ? `${nA} atrasada${nA > 1 ? 's' : ''}` : '', nH ? `${nH} vence${nH > 1 ? 'm' : ''} hoje` : ''].filter(Boolean).join(' · ');
+                        const linhas = tasksToNotify.slice(0, 3).map(n => '• ' + curto(n.task.title));
+                        if (tasksToNotify.length > 3) linhas.push(`+ ${tasksToNotify.length - 3} outras`);
+                        window.pywebview.api.send_desktop_notification(titulo, linhas.join('\n'), true);
                     }
                 }
             }
         }
 
+        function nxTextoAtraso(d) { d = Math.max(1, Number(d) || 1); return d === 1 ? 'Atrasada há 1 dia' : `Atrasada há ${d} dias`; }
         function renderNotificationPanelContent(overdueTasks, todayTasks, soonTasks) {
-            const listContainer = document.getElementById('notificationList');
-            if (!listContainer) return;
-
-            const total = overdueTasks.length + todayTasks.length + soonTasks.length;
-            if (total === 0) {
-                listContainer.innerHTML = `
-                    <div class="py-8 text-center flex flex-col items-center justify-center text-gray-500">
-                        <i class="fa-regular fa-circle-check text-2xl text-emerald-400/60 mb-2"></i>
-                        <p class="font-medium text-gray-300">Tudo em dia!</p>
-                        <p class="text-[11px] text-gray-500 mt-0.5">Nenhuma tarefa atrasada ou com prazo próximo.</p>
-                    </div>
-                `;
+            const box = document.getElementById('notificationList');
+            if (!box) return;
+            const itens = overdueTasks.map(i => ['atr', 'fa-solid fa-circle-exclamation', nxTextoAtraso(i.status.diff), i.task])
+                .concat(todayTasks.map(i => ['hoje', 'fa-solid fa-clock', 'Vence hoje', i.task]))
+                .concat(soonTasks.map(i => ['prox', 'fa-regular fa-calendar', i.status.diff === 1 ? 'Amanhã' : `Em ${i.status.diff} dias`, i.task]));
+            if (!itens.length) {
+                box.innerHTML = '<div class="nx-notif-empty"><i class="fa-regular fa-circle-check"></i><b>Tudo em dia</b><span>Nenhuma tarefa atrasada ou com prazo próximo.</span></div>';
                 return;
             }
-
-            let html = '';
-
-            if (overdueTasks.length > 0) {
-                html += `
-                    <div class="mb-2">
-                        <div class="text-[10px] font-bold text-rose-400 uppercase tracking-wider px-1 mb-1 flex items-center gap-1.5">
-                            <i class="fa-solid fa-triangle-exclamation"></i> Atrasadas (${overdueTasks.length})
-                        </div>
-                        <div class="space-y-1.5">
-                            ${overdueTasks.map(item => createNotifItemHTML(item.task, 'border-rose-500/30 bg-rose-950/20 text-rose-300', item.status.label, 'text-rose-400')).join('')}
-                        </div>
-                    </div>
-                `;
-            }
-
-            if (todayTasks.length > 0) {
-                html += `
-                    <div class="mb-2">
-                        <div class="text-[10px] font-bold text-amber-400 uppercase tracking-wider px-1 mb-1 flex items-center gap-1.5">
-                            <i class="fa-solid fa-clock"></i> Vencem Hoje (${todayTasks.length})
-                        </div>
-                        <div class="space-y-1.5">
-                            ${todayTasks.map(item => createNotifItemHTML(item.task, 'border-amber-500/30 bg-amber-950/20 text-amber-300', item.status.label, 'text-amber-400')).join('')}
-                        </div>
-                    </div>
-                `;
-            }
-
-            if (soonTasks.length > 0) {
-                html += `
-                    <div class="mb-1">
-                        <div class="text-[10px] font-bold text-sky-400 uppercase tracking-wider px-1 mb-1 flex items-center gap-1.5">
-                            <i class="fa-regular fa-calendar-days"></i> Próximos Dias (${soonTasks.length})
-                        </div>
-                        <div class="space-y-1.5">
-                            ${soonTasks.map(item => createNotifItemHTML(item.task, 'border-sky-500/20 bg-sky-950/10 text-sky-300', item.status.label, 'text-sky-400')).join('')}
-                        </div>
-                    </div>
-                `;
-            }
-
-            listContainer.innerHTML = html;
-        }
-
-        function createNotifItemHTML(task, badgeClass, statusLabel, iconColor) {
-            const cat = state.categories.find(c => c.id === task.categoryId);
-            const proj = state.projects.find(p => p.id === task.projectId);
-            const contextText = [cat ? cat.name : null, proj ? proj.name : null].filter(Boolean).join(' • ');
-
-            return `
-                <div class="p-2 rounded bg-white/5 hover:bg-white/10 border border-white/5 transition flex items-start justify-between gap-2 group cursor-pointer" onclick="openTaskFromNotif('${task.id}')">
-                    <div class="flex items-start gap-2 min-w-0 flex-1">
-                        <button onclick="event.stopPropagation(); quickCompleteFromNotif('${task.id}')" class="mt-0.5 w-4 h-4 rounded-full border border-gray-600 hover:border-emerald-400 hover:bg-emerald-500/20 flex items-center justify-center transition cursor-pointer flex-shrink-0" title="Concluir tarefa agora">
-                            <i class="fa-solid fa-check text-[8px] text-transparent group-hover:text-emerald-300"></i>
-                        </button>
-                        <div class="min-w-0 flex-1">
-                            <div class="text-xs text-gray-200 font-medium truncate group-hover:text-white" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</div>
-                            <div class="flex items-center gap-2 mt-1">
-                                <span class="text-[9px] font-semibold px-1.5 py-0.2 rounded border ${badgeClass} whitespace-nowrap">${statusLabel}</span>
-                                ${contextText ? `<span class="text-[10px] text-gray-500 truncate max-w-[150px]">${escapeHtml(contextText)}</span>` : ''}
-                            </div>
-                        </div>
-                    </div>
-                    <i class="fa-solid fa-arrow-right text-[10px] text-gray-600 group-hover:text-sky-400 mt-1 flex-shrink-0 transition"></i>
-                </div>
-            `;
+            box.innerHTML = itens.map(([cls, ic, txt, t]) => {
+                const pj = t.projectId && state.projects.find(p => p.id === t.projectId);
+                return `<div class="nx-ni ${cls}" onclick="openTaskFromNotif('${escapeJsStr(t.id)}')" title="${escapeHtml(t.title)}">
+                    <i class="ic ${ic}"></i>
+                    <div class="tx"><div class="tt">${escapeHtml(t.title)}</div><div class="st">${txt}${pj ? ' · ' + escapeHtml(pj.name) : ''}</div></div>
+                    <button class="ck" onclick="event.stopPropagation(); quickCompleteFromNotif('${escapeJsStr(t.id)}')" title="Concluir tarefa"><i class="fa-solid fa-check"></i></button>
+                </div>`;
+            }).join('');
         }
 
         /* Popup de visualizacao rapida: so mostra os campos preenchidos */
@@ -8153,6 +8373,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             if (steps.length) partes.push(campo('fa-solid fa-list-check', `Etapas (${steps.filter(x => x.completed).length}/${steps.length})`,
                 steps.map(x => `<div class="${x.completed ? 'line-through text-gray-500' : ''}">${x.completed ? '&#10003;' : '&#9675;'} ${escapeHtml(x.title || '')}</div>`).join('')));
             if (anexos.length) partes.push(campo('fa-solid fa-paperclip', 'Anexos', anexos.map(a => `<div>${escapeHtml(a.name || '')}</div>`).join('')));
+            if (t.recurrence) partes.push(campo('fa-solid fa-rotate', 'Repete', escapeHtml(textoRecorrencia(t.recurrence))));
+            const citada = state.notepad.filter(n => String(n.content || '').includes('#nx-task:' + t.id));
+            if (citada.length) partes.push(campo('fa-solid fa-at', 'Citada nas páginas', citada.map(n =>
+                `<div><a class="text-sky-400 cursor-pointer hover:underline" onclick="closeTaskPeek(); nxAbrirPaginaCitada('${escapeJsStr(n.id)}')">${escapeHtml(n.title || 'Sem título')}</a></div>`).join('')));
             if (t.createdAt) partes.push(campo('fa-regular fa-clock', 'Criada em', formatDateBR(String(t.createdAt).split('T')[0])));
             document.getElementById('taskPeekTitle').textContent = t.title || '';
             document.getElementById('taskPeekBody').innerHTML = partes.join('');
@@ -8167,19 +8391,29 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         document.addEventListener('keydown', e => { if (e.key === 'Escape') closeTaskPeek(); });
 
         function abrirNotificacoesModal() {
-            checkDeadlinesAndNotify(false);
             const m = document.getElementById('notifModal');
             if (!m) return;
+            if (!m.classList.contains('hidden')) { fecharNotificacoesModal(); return; }
+            checkDeadlinesAndNotify(false);
+            const b = document.getElementById('notifBellBtn');
+            if (b) {
+                const r = b.getBoundingClientRect();
+                m.style.top = (r.bottom + 8) + 'px';
+                m.style.right = Math.max(8, window.innerWidth - r.right - 4) + 'px';
+            }
             m.classList.remove('hidden');
-            m.classList.add('flex');
+            m.style.animation = 'none'; void m.offsetWidth; m.style.animation = '';
         }
 
         function fecharNotificacoesModal() {
             const m = document.getElementById('notifModal');
-            if (!m) return;
-            m.classList.add('hidden');
-            m.classList.remove('flex');
+            if (m) m.classList.add('hidden');
         }
+        document.addEventListener('mousedown', e => {
+            const m = document.getElementById('notifModal');
+            if (m && !m.classList.contains('hidden') && !m.contains(e.target) && !(e.target.closest && e.target.closest('#notifBellBtn'))) fecharNotificacoesModal();
+        });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') fecharNotificacoesModal(); });
 
         function openTaskFromNotif(taskId) {
             fecharNotificacoesModal();
@@ -8191,15 +8425,15 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
         function quickCompleteFromNotif(taskId) {
             toggleTaskCompletion(taskId);
-            checkDeadlinesAndNotify(false);
+            setTimeout(() => checkDeadlinesAndNotify(false), 520);   // espera a animacao de conclusao
             showToast("Tarefa concluída!");
         }
 
         function testarNotificacaoWindows() {
             if (window.pywebview && window.pywebview.api && typeof window.pywebview.api.send_desktop_notification === 'function') {
                 window.pywebview.api.send_desktop_notification(
-                    "NEXUS - Notificações Push Ativas",
-                    "As notificações do Windows estão configuradas e funcionando com sucesso no NEXUS!",
+                    "Notificações ativas",
+                    "Os avisos de prazo vão aparecer assim.",
                     true
                 );
                 showToast("Notificação de teste enviada ao Windows!");
@@ -9000,6 +9234,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 const a = e.target.closest && e.target.closest('a[href]');
                 if (!a || !ed.contains(a)) return;
                 e.preventDefault();
+                const hr = a.getAttribute('href') || '';
+                if (hr.startsWith('#nx-note:')) { nxAbrirPaginaCitada(hr.slice(9)); return; }
+                if (hr.startsWith('#nx-task:')) { openTaskPeek(hr.slice(9)); return; }
                 const api = window.pywebview && window.pywebview.api;
                 if (api && api.open_external_target) {
                     api.open_external_target(a.href).then(r => { if (r && r.status === 'error') showToast(r.message || 'Não foi possível abrir o link.'); });
@@ -9121,24 +9358,30 @@ def main():
             resizable=True
         )
         api.set_window(window)
+        # Janelinha da captura rapida: criada oculta, aparece no Ctrl+Alt+N.
+        try:
+            import ctypes
+            sw, sh = ctypes.windll.user32.GetSystemMetrics(0), ctypes.windll.user32.GetSystemMetrics(1)
+            api._qc_win = webview.create_window(
+                'NEXUS - Captura rapida', url=_escrever_ui_local('captura.html', QC_HTML),
+                js_api=api, width=620, height=118, x=max(0, (sw - 620) // 2), y=int(sh * 0.2),
+                frameless=True, on_top=True, hidden=True, resizable=False, background_color='#0f0f0f')
+            window.events.closed += (lambda: api._qc_win and api._qc_win.destroy())
+            _iniciar_atalho_global(api)
+        except Exception as e:
+            print(f"[NEXUS] Captura rapida desativada: {e}")
         window.events.shown += (lambda: _instalar_chrome_unico(window))
-        window.events.closing += (lambda: api._spotify_encerrar())
-        # Garantia de saida: a janela do Spotify nao pode manter o processo vivo
-        # (um processo fantasma prende o perfil do WebView2 e quebra a proxima abertura).
+        # Garantia de saida: um processo fantasma prende o perfil do WebView2 e
+        # quebra a proxima abertura.
         window.events.closed += (lambda: threading.Thread(
             target=lambda: (time.sleep(5), os._exit(0)), daemon=True).start())
-        # Perfil PERSISTENTE (padrao do pywebview e "privado"): sem isso o login
-        # do Spotify some a cada abertura. Pasta propria, fora de db/.
+        # Perfil PERSISTENTE (padrao do pywebview e "privado"): sem isso as
+        # preferencias da interface (localStorage) somem a cada abertura.
         perfil = os.path.join(os.path.dirname(api._base_dir), "webview")
         try:
             os.makedirs(perfil, exist_ok=True)
         except Exception:
             perfil = None
-        # O player do Spotify (iframe invisivel) precisa tocar sem clique direto nele.
-        _arg = "--autoplay-policy=no-user-gesture-required"
-        _atual = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
-        if _arg not in _atual:
-            os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (_atual + " " + _arg).strip()
         # NEXUS_DEBUG=1 liga o DevTools (botao direito > Inspecionar) em todas as janelas.
         webview.start(debug=(os.environ.get("NEXUS_DEBUG") == "1"), private_mode=False, storage_path=perfil)
     except Exception as e:
