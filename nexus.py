@@ -28,7 +28,7 @@ except Exception as e:
     show_native_error_dialog("Erro ao Iniciar - NEXUS", err_msg)
     sys.exit(1)
 
-APP_VERSION = "v6.3.23"
+APP_VERSION = "v0.0.2"
 
 # ---------------------------------------------------------------------------
 # NOTIFICAÇÕES DESKTOP E ÍCONE NA BARRA DE TAREFAS (WINDOWS)
@@ -2797,37 +2797,17 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         .nx-dt-foot button { font-size: 11px; color: #fb7185; background: none; border: 0; cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 5px 7px; border-radius: 6px; }
         .nx-dt-foot button:hover { background: rgba(244,63,94,.1); }
 
-        /* ---- Tarefas ao lado do Vault ---- */
-        .nx-vt { flex: 0 0 42%; min-width: 290px; max-width: 560px; flex-direction: column; background: #050505; border-left: 1px solid #1f1f1f; min-height: 0; animation: nxIn .2s ease both; }
-        .nx-vt-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 18px 16px 12px 20px; }
-        .nx-vt-tt { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
-        .nx-vt-tt > span { font-size: 20px; font-weight: 700; color: #fff; }
-        .nx-vt-tt select, .nx-dt-chip select { field-sizing: content; }
-        .nx-vt-tt select { background: transparent; border: 0; color: #8b8b90; font-size: 12px; outline: none; cursor: pointer; max-width: 210px; min-width: 0; text-overflow: ellipsis; font-family: inherit; }
-        .nx-vt-tt select:hover { color: #fff; }
-        .nx-vt-tt select option { background: #0f0f0f; color: #e5e5e5; }
-        .nx-vt-head button { color: #6b7280; background: none; border: 0; cursor: pointer; padding: 6px 8px; border-radius: 6px; }
-        .nx-vt-head button:hover { color: #fff; background: #151515; }
-        .nx-vt-add { margin: 0 16px 6px 20px; }
-        .nx-vt-list { flex: 1; overflow-y: auto; padding: 0 12px 10px 14px; min-height: 0; }
-        .nx-vt-row { display: flex; align-items: flex-start; gap: 12px; padding: 11px 8px; border-bottom: 1px solid #151515; border-radius: 6px; }
-        .nx-vt-row:hover { background: #0e0e0e; }
-        .nx-vt-ck { width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid #4b5563; margin-top: 1px; flex-shrink: 0; background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 9px; transition: border-color .15s, background .15s; }
-        .nx-vt-ck:hover { border-color: #7aa7f0; }
-        .nx-vt-row.feita .nx-vt-ck { background: #10b981; border-color: #10b981; }
-        .nx-vt-tx { flex: 1; min-width: 0; cursor: pointer; }
-        .nx-vt-tx .tt { font-size: 13px; color: #e5e5e5; line-height: 1.35; overflow-wrap: anywhere; }
-        .nx-vt-row.feita .tt { text-decoration: line-through; color: #6b7280; }
-        .nx-vt-tx .st { display: flex; flex-wrap: wrap; gap: 3px 10px; margin-top: 3px; font-size: 11px; color: #7c7c80; }
-        .nx-vt-tx .st .r { color: #f87171; }
-        .nx-vt-tx .st .a { color: #fbbf24; }
-        .nx-vt-tx .st i { font-size: 9px; margin-right: 3px; }
-        .nx-vt-star { color: #3f3f46; background: none; border: 0; cursor: pointer; padding: 2px 4px; font-size: 12px; flex-shrink: 0; }
-        .nx-vt-star:hover, .nx-vt-star.on { color: #fbbf24; }
-        .nx-vt-empty { padding: 26px 12px; text-align: center; font-size: 12px; color: #6b7280; line-height: 1.6; }
-        .nx-vt-foot { padding: 4px 14px 10px; }
-        .nx-vt-foot button { font-size: 11px; color: #8b8b90; background: none; border: 0; cursor: pointer; padding: 4px 6px; border-radius: 6px; }
-        .nx-vt-foot button:hover { color: #fff; background: #151515; }
+        /* ---- Split: aba Tarefas ao lado do Vault ---- */
+        #main-tasks-view.nx-split-tasks { flex: 1 1 50%; border-left: 1px solid #1f1f1f; }
+        #main-notepad-view.nx-split-vault { flex: 1 1 50%; }
+        #main-tasks-view.nx-split-tasks #kanban-view-container { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .nx-split-only { display: none !important; }
+        #main-tasks-view.nx-split-tasks .nx-split-only { display: inline-flex !important; }
+        .nx-split-sel { background: #0a0a0a; border: 1px solid #262626; border-radius: 6px; color: #d3d3d3; font-size: 12px; padding: 4px 8px; outline: none; cursor: pointer; max-width: 180px; font-family: inherit; }
+        .nx-split-sel:hover { border-color: #3a3a3a; }
+        .nx-split-sel option { background: #0f0f0f; }
+        .nx-split-x { align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; background: none; border: 0; color: #6b7280; cursor: pointer; }
+        .nx-split-x:hover { color: #fff; background: #151515; }
         .notion-btn.nx-on { color: #7aa7f0 !important; background: rgba(66,114,196,.14); }
 
         /* ---- Motion ao concluir ---- */
@@ -2843,6 +2823,14 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         .nx-concluindo button.rounded-full, .nx-concluindo .nx-vt-ck { background: #10b981 !important; border-color: #10b981 !important; }
         @keyframes nxConcl { 0% { } 30% { background-color: rgba(16,185,129,.10); } 100% { opacity: .35; transform: translateX(10px); background-color: rgba(16,185,129,.05); } }
         @media (prefers-reduced-motion: reduce) { .nx-burst, .nx-concluindo { animation: none !important; } }
+        /* ---- Kanban: arrastar entre colunas ---- */
+        .nx-kb-col { transition: border-color .15s, background-color .15s; }
+        .nx-kb-col.nx-kb-over { border-color: #4272c4 !important; background-color: rgba(66,114,196,.07) !important; }
+        .nx-kb-card { cursor: grab; }
+        .nx-kb-card:active { cursor: grabbing; }
+        .nx-kb-card.nx-kb-drag { opacity: .35; transform: scale(.98); }
+        .nx-kb-card.nx-kb-novo { animation: nxKbIn .35s cubic-bezier(.2,.8,.2,1) both; }
+        @keyframes nxKbIn { from { opacity: 0; transform: translateY(-6px) scale(.98); } to { opacity: 1; transform: none; } }
         .nx-res-side .nt-res-head { display: none; }
         .nx-res-side .nt-res-body { resize: none !important; max-height: none !important; overflow: visible !important; }
         .nx-res-side { margin: 0 !important; border: 0 !important; padding: 0 !important; background: transparent !important; }
@@ -3233,6 +3221,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     </div>
 
                     <div class="flex items-center gap-2 flex-shrink-0">
+                        <select id="nx-split-filtro" class="nx-split-only nx-split-sel" onchange="selectList(this.value)" title="Lista exibida ao lado da página"></select>
                         <div class="flex flex-wrap items-center bg-white/5 border border-white/5 p-0.5 rounded text-xs font-semibold">
                             <button id="view-mode-list" onclick="setViewMode('list')" class="px-2.5 py-1 rounded bg-[#161616] text-white border border-white/10 transition cursor-pointer">
                                 <i class="fa-solid fa-list mr-1"></i> Lista
@@ -3241,6 +3230,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                                 <i class="fa-solid fa-table-columns mr-1"></i> Kanban
                             </button>
                         </div>
+                        <button class="nx-split-only nx-split-x" onclick="nxToggleTarefasVault(false)" title="Fechar o split de tarefas"><i class="fa-solid fa-xmark"></i></button>
                     </div>
                 </header>
 
@@ -3267,19 +3257,19 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                     <!-- min-w-0 em cada coluna: sem isso, itens de grid nao encolhem
                          abaixo do conteudo e os cards vazam para fora da coluna. -->
                     <div id="kanban-view-container" class="hidden grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 h-full pb-6">
-                        <div class="flex flex-col min-w-0 bg-[#0a0a0a] border border-[#262626] rounded p-2.5">
+                        <div class="nx-kb-col flex flex-col min-w-0 bg-[#0a0a0a] border border-[#262626] rounded p-2.5" data-kb="todo" ondragover="nxKbOver(event)" ondragleave="nxKbLeave(event)" ondrop="nxKbDrop(event)">
                             <span class="text-xs font-bold text-gray-400 uppercase tracking-wider pb-2 border-b border-[#262626] mb-2 flex justify-between gap-2"><span class="truncate">A Fazer</span> <span id="kanban-count-todo" class="font-mono flex-shrink-0">0</span></span>
                             <div id="kanban-col-todo" class="space-y-2 flex-1 overflow-y-auto overflow-x-hidden min-h-[140px] min-w-0"></div>
                         </div>
-                        <div class="flex flex-col min-w-0 bg-[#0a0a0a] border border-[#262626] rounded p-2.5">
+                        <div class="nx-kb-col flex flex-col min-w-0 bg-[#0a0a0a] border border-[#262626] rounded p-2.5" data-kb="progress" ondragover="nxKbOver(event)" ondragleave="nxKbLeave(event)" ondrop="nxKbDrop(event)">
                             <span class="text-xs font-bold text-sky-400 uppercase tracking-wider pb-2 border-b border-[#262626] mb-2 flex justify-between gap-2"><span class="truncate">Em Execução</span> <span id="kanban-count-progress" class="font-mono flex-shrink-0">0</span></span>
                             <div id="kanban-col-progress" class="space-y-2 flex-1 overflow-y-auto overflow-x-hidden min-h-[140px] min-w-0"></div>
                         </div>
-                        <div class="flex flex-col min-w-0 bg-[#0a0a0a] border border-[#262626] rounded p-2.5">
+                        <div class="nx-kb-col flex flex-col min-w-0 bg-[#0a0a0a] border border-[#262626] rounded p-2.5" data-kb="review" ondragover="nxKbOver(event)" ondragleave="nxKbLeave(event)" ondrop="nxKbDrop(event)">
                             <span class="text-xs font-bold text-amber-400 uppercase tracking-wider pb-2 border-b border-[#262626] mb-2 flex justify-between gap-2"><span class="truncate">Quase Pronto</span> <span id="kanban-count-review" class="font-mono flex-shrink-0">0</span></span>
                             <div id="kanban-col-review" class="space-y-2 flex-1 overflow-y-auto overflow-x-hidden min-h-[140px] min-w-0"></div>
                         </div>
-                        <div class="flex flex-col min-w-0 bg-[#0a0a0a] border border-[#262626] rounded p-2.5">
+                        <div class="nx-kb-col flex flex-col min-w-0 bg-[#0a0a0a] border border-[#262626] rounded p-2.5" data-kb="done" ondragover="nxKbOver(event)" ondragleave="nxKbLeave(event)" ondrop="nxKbDrop(event)">
                             <span class="text-xs font-bold text-emerald-400 uppercase tracking-wider pb-2 border-b border-[#262626] mb-2 flex justify-between gap-2"><span class="truncate">Concluído</span> <span id="kanban-count-done" class="font-mono flex-shrink-0">0</span></span>
                             <div id="kanban-col-done" class="space-y-2 flex-1 overflow-y-auto overflow-x-hidden min-h-[140px] min-w-0"></div>
                         </div>
@@ -3400,16 +3390,6 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 </div>
             </div>
 
-            <!-- TAREFAS AO LADO DA PAGINA (split view) -->
-            <aside id="nx-vtasks" class="nx-vt" style="display:none">
-                <div class="nx-vt-head">
-                    <div class="nx-vt-tt"><span>Tarefas</span><select id="nx-vt-proj" onchange="nxVtEscolher(this.value)" title="O que mostrar"></select></div>
-                    <button onclick="nxToggleTarefasVault(false)" title="Fechar"><i class="fa-solid fa-xmark"></i></button>
-                </div>
-                <div class="nx-vt-add"><i class="fa-solid fa-plus"></i><input id="nx-vt-input" maxlength="300" autocomplete="off" placeholder="Nova tarefa (Enter)"></div>
-                <div id="nx-vt-list" class="nx-vt-list"></div>
-                <div class="nx-vt-foot"><button id="nx-vt-feitas" onclick="nxVtFeitas()"></button></div>
-            </aside>
         </main>
 
         <!-- PAINEL LATERAL DIREITO (abre pela barra de aplicativos) -->
@@ -5153,107 +5133,72 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         })();
 
         /* ---------------- Tarefas ao lado do Vault (split view) ---------------- */
-        // Guardado no layout do editor (por usuario): aberto, filtro escolhido por pagina, mostrar concluidas.
+        // A propria aba Tarefas (lista/Kanban, captura, painel de detalhes) divide a tela com o Vault.
+        // Estado guardado no layout do editor, por usuario.
         function nxVtCfg() {
             const L = ensureLayout();
-            if (!L.tarefas || typeof L.tarefas !== 'object') L.tarefas = { aberto: false, porNota: {}, feitas: false };
-            if (!L.tarefas.porNota || typeof L.tarefas.porNota !== 'object') L.tarefas.porNota = {};
+            if (!L.tarefas || typeof L.tarefas !== 'object') L.tarefas = { aberto: false };
             return L.tarefas;
         }
-        function nxVtNota() { return selectedNoteId && state.notepad.find(n => n.id === selectedNoteId); }
+        function nxSplitTarefasAtivo() {
+            try { return appMode === 'notepad' && !!nxVtCfg().aberto; } catch (e) { return false; }
+        }
         function nxVtTarefasDaPagina(nota) {
             if (!nota) return [];
             const ids = new Set(state.tasks.filter(t => t.noteId === nota.id).map(t => t.id));
             try { nxCitadosPor(nota).tarefas.forEach(t => ids.add(t.id)); } catch (e) { }
             return state.tasks.filter(t => ids.has(t.id));
         }
-        function nxVtFiltro(nota) {
-            const c = nxVtCfg();
-            const esc = nota && c.porNota[nota.id];
-            if (esc === 'all' || esc === 'page' || (esc && state.projects.some(p => p.id === esc))) return esc;
-            // automatico: o projeto mais presente nas tarefas da pagina
-            const daPag = nxVtTarefasDaPagina(nota);
+        // Projeto mais presente nas tarefas da pagina aberta (ou null).
+        function nxVtProjetoDaPagina() {
+            const nota = selectedNoteId && state.notepad.find(n => n.id === selectedNoteId);
             const cont = {};
-            daPag.forEach(t => { if (t.projectId && state.projects.some(p => p.id === t.projectId)) cont[t.projectId] = (cont[t.projectId] || 0) + 1; });
-            const top = Object.keys(cont).sort((a, b) => cont[b] - cont[a])[0];
-            if (top) return top;
-            return daPag.length ? 'page' : 'all';
+            nxVtTarefasDaPagina(nota).forEach(t => { if (t.projectId && state.projects.some(p => p.id === t.projectId)) cont[t.projectId] = (cont[t.projectId] || 0) + 1; });
+            return Object.keys(cont).sort((x, y) => cont[y] - cont[x])[0] || null;
         }
         function nxToggleTarefasVault(forcar) {
             const c = nxVtCfg();
             c.aberto = typeof forcar === 'boolean' ? forcar : !c.aberto;
             saveState(false);
-            nxRenderTarefasVault();
-        }
-        function nxVtEscolher(v) { const n = nxVtNota(); if (n) nxVtCfg().porNota[n.id] = v; saveState(false); nxRenderTarefasVault(); }
-        function nxVtFeitas() { const c = nxVtCfg(); c.feitas = !c.feitas; saveState(false); nxRenderTarefasVault(); }
-        function nxVtLinha(t, nota) {
-            const feita = (Number(t.progress) || 0) >= 100;
-            const sub = [];
-            if (t.dueDate) {
-                const d = calculateDaysDiff(t.dueDate, getTodayDateStr());
-                if (feita) sub.push(`<span>${formatDateBR(t.dueDate)}</span>`);
-                else if (d < 0) sub.push(`<span class="r">${nxTextoAtraso(-d)}</span>`);
-                else if (d === 0) sub.push('<span class="r">Hoje</span>');
-                else if (d === 1) sub.push('<span class="a">Amanhã</span>');
-                else sub.push(`<span>${formatDateBR(t.dueDate)}</span>`);
+            if (c.aberto) {
+                const pj = nxVtProjetoDaPagina();
+                if (pj) { selectList(pj); }
             }
-            const st = Array.isArray(t.steps) ? t.steps : [];
-            if (st.length) sub.push(`<span>${st.filter(x => x.completed).length}/${st.length}</span>`);
-            const pj = t.projectId && state.projects.find(p => p.id === t.projectId);
-            const f = nxVtFiltro(nota);
-            if (pj && (f === 'all' || f === 'page')) sub.push(`<span><i class="fa-solid fa-circle" style="color:${escapeHtml(pj.color || '#4272c4')}"></i>${escapeHtml(pj.name)}</span>`);
-            const nt = t.noteId && t.noteId !== (nota && nota.id) && state.notepad.find(n => n.id === t.noteId);
-            if (nt) sub.push(`<span><i class="fa-solid fa-link"></i>${escapeHtml(nt.title || 'Página')}</span>`);
-            if (t.recurrence) sub.push('<span><i class="fa-solid fa-rotate"></i>Repete</span>');
-            const id = escapeJsStr(t.id);
-            return `<div class="nx-vt-row ${feita ? 'feita' : ''}" data-task-id="${escapeHtml(t.id)}">
-                <button class="nx-vt-ck" onclick="event.stopPropagation(); toggleTaskCompletion('${id}')" title="${feita ? 'Reabrir tarefa' : 'Concluir tarefa'}">${feita ? '<i class="fa-solid fa-check"></i>' : ''}</button>
-                <div class="nx-vt-tx" onclick="openTaskPeek('${id}')"><div class="tt">${escapeHtml(t.title)}</div>${sub.length ? `<div class="st">${sub.join('')}</div>` : ''}</div>
-                <button class="nx-vt-star ${t.isStarred ? 'on' : ''}" onclick="event.stopPropagation(); toggleTaskStar('${id}')" title="Favoritar"><i class="${t.isStarred ? 'fa-solid' : 'fa-regular'} fa-star"></i></button>
-            </div>`;
+            nxRenderTarefasVault();
+            if (c.aberto) renderCurrentView();
         }
         function nxRenderTarefasVault() {
-            const box = document.getElementById('nx-vtasks'); if (!box) return;
-            const c = nxVtCfg();
-            const btn = document.getElementById('nt-tasks-btn'); if (btn) btn.classList.toggle('nx-on', !!c.aberto);
-            if (!c.aberto) { box.style.display = 'none'; return; }
-            box.style.display = 'flex';
-            const nota = nxVtNota();
-            const f = nxVtFiltro(nota);
-            const sel = document.getElementById('nx-vt-proj');
-            if (sel && document.activeElement !== sel) {
-                sel.innerHTML = '<option value="page">Desta página</option><option value="all">Todos os projetos</option>'
-                    + state.projects.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
-                sel.value = f;
+            const mt = document.getElementById('main-tasks-view'), mn = document.getElementById('main-notepad-view');
+            if (!mt || !mn) return;
+            const ativo = nxSplitTarefasAtivo();
+            const btn = document.getElementById('nt-tasks-btn'); if (btn) btn.classList.toggle('nx-on', ativo);
+            mt.classList.toggle('nx-split-tasks', ativo);
+            mn.classList.toggle('nx-split-vault', ativo);
+            if (ativo) {
+                if (mn.nextElementSibling !== mt) mn.parentNode.insertBefore(mt, mn.nextSibling);   // Vault a esquerda, Tarefas a direita
+                mt.classList.remove('hidden');
+                const sel = document.getElementById('nx-split-filtro');
+                if (sel && document.activeElement !== sel) {
+                    const op = (v, t) => `<option value="${escapeHtml(v)}">${escapeHtml(t)}</option>`;
+                    sel.innerHTML = op('myday', 'Meu Dia') + op('planned', 'Planejadas') + op('all', 'Todas as Tarefas')
+                        + (state.projects.length ? '<optgroup label="Projetos">' + state.projects.map(p => op(p.id, p.name)).join('') + '</optgroup>' : '')
+                        + (state.categories.length ? '<optgroup label="Categorias">' + state.categories.map(c => op(c.id, c.name)).join('') + '</optgroup>' : '');
+                    sel.value = currentFilter;
+                }
+            } else {
+                if (mt.nextElementSibling !== mn) mn.parentNode.insertBefore(mt, mn);               // ordem original
+                if (appMode !== 'tasks') mt.classList.add('hidden');
             }
-            const lista = f === 'all' ? state.tasks.slice() : f === 'page' ? nxVtTarefasDaPagina(nota) : state.tasks.filter(t => t.projectId === f);
-            const pront = t => (Number(t.progress) || 0) >= 100;
-            const abertas = lista.filter(t => !pront(t)).sort((a, b) => (a.dueDate || '9999').localeCompare(b.dueDate || '9999') || ((b.isStarred ? 1 : 0) - (a.isStarred ? 1 : 0)));
-            const feitas = lista.filter(pront);
-            const mostrar = c.feitas ? abertas.concat(feitas) : abertas;
-            const el = document.getElementById('nx-vt-list');
-            el.innerHTML = mostrar.length ? mostrar.map(t => nxVtLinha(t, nota)).join('')
-                : `<div class="nx-vt-empty">${f === 'page' ? 'Nenhuma tarefa nesta página.<br>Crie uma acima ou use o Quadro de tarefas.' : 'Nenhuma tarefa pendente aqui.'}</div>`;
-            const fb = document.getElementById('nx-vt-feitas');
-            if (fb) { fb.style.display = feitas.length ? '' : 'none'; fb.textContent = c.feitas ? 'Ocultar concluídas' : `Mostrar concluídas (${feitas.length})`; }
         }
-        document.addEventListener('keydown', e => {
-            if (!(e.target && e.target.id === 'nx-vt-input' && e.key === 'Enter')) return;
-            e.preventDefault();
-            const v = e.target.value.trim(); if (!v) return;
-            const nota = nxVtNota(), f = nxVtFiltro(nota);
-            const t = nxCriarDaCaptura(v); if (!t) return;
-            if (!t.projectId && f !== 'all' && f !== 'page') t.projectId = f;
-            if (f === 'page' && nota) t.noteId = nota.id;
-            saveState(true, true);
-            renderAll();
-            e.target.value = '';
-            e.target.focus();
-        });
         (function () {
             const _ra = renderAll; renderAll = function () { const r = _ra.apply(this, arguments); try { nxRenderTarefasVault(); } catch (e) { } return r; };
             const _rh = refreshNoteHeader; refreshNoteHeader = function () { const r = _rh.apply(this, arguments); try { nxRenderTarefasVault(); } catch (e) { } return r; };
+            const _sm = switchAppMode; switchAppMode = function () {
+                const r = _sm.apply(this, arguments);
+                try { nxRenderTarefasVault(); if (nxSplitTarefasAtivo()) renderCurrentView(); } catch (e) { }
+                return r;
+            };
+            const _sl = selectList; selectList = function () { const r = _sl.apply(this, arguments); try { nxRenderTarefasVault(); } catch (e) { } return r; };
         })();
 
         /* ---------------- Motion ao concluir tarefa ---------------- */
@@ -5290,6 +5235,68 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 setTimeout(() => { nxConcluindo.delete(taskId); _orig(taskId); }, 470);
             };
         })();
+
+        /* ---------------- Kanban: arrastar tarefas entre colunas ---------------- */
+        // As colunas sao faixas de progresso: A fazer = 0, Em execucao = 1-74, Quase pronto = 75-99, Concluido = 100.
+        let nxKbArrastando = null;
+        function nxKbColunaDe(p) { p = Number(p) || 0; return p >= 100 ? 'done' : p >= 75 ? 'review' : p > 0 ? 'progress' : 'todo'; }
+        function nxKbStart(ev, id) {
+            nxKbArrastando = id;
+            try { ev.dataTransfer.effectAllowed = 'move'; ev.dataTransfer.setData('text/plain', id); } catch (e) { }
+            const el = ev.currentTarget; setTimeout(() => el && el.classList.add('nx-kb-drag'), 0);
+        }
+        function nxKbEnd(ev) {
+            nxKbArrastando = null;
+            if (ev.currentTarget) ev.currentTarget.classList.remove('nx-kb-drag');
+            document.querySelectorAll('.nx-kb-col.nx-kb-over').forEach(c => c.classList.remove('nx-kb-over'));
+        }
+        function nxKbOver(ev) {
+            if (!nxKbArrastando) return;
+            ev.preventDefault();
+            try { ev.dataTransfer.dropEffect = 'move'; } catch (e) { }
+            ev.currentTarget.classList.add('nx-kb-over');
+        }
+        function nxKbLeave(ev) {
+            const c = ev.currentTarget;
+            if (!c.contains(ev.relatedTarget)) c.classList.remove('nx-kb-over');
+        }
+        function nxKbDrop(ev) {
+            const col = ev.currentTarget;
+            col.classList.remove('nx-kb-over');
+            const id = nxKbArrastando || (ev.dataTransfer && ev.dataTransfer.getData('text/plain'));
+            nxKbArrastando = null;
+            if (!id) return;
+            ev.preventDefault();
+            nxKbMover(id, col.dataset.kb, { x: ev.clientX, y: ev.clientY });
+        }
+        // Move a tarefa para a coluna; tambem usado pelos testes.
+        function nxKbMover(id, destino, ponto) {
+            const t = state.tasks.find(x => x.id === id);
+            if (!t || nxKbColunaDe(t.progress) === destino) return false;
+            const steps = Array.isArray(t.steps) ? t.steps : [];
+            const feitas = steps.length ? Math.round(steps.filter(x => x.completed).length / steps.length * 100) : null;
+            if (destino === 'done') {
+                t.progress = 100;
+                steps.forEach(x => x.completed = true);
+                if (ponto) {   // o mesmo efeito do check, no ponto onde a tarefa foi solta
+                    const fake = { getBoundingClientRect: () => ({ left: ponto.x, top: ponto.y, width: 0, height: 0 }) };
+                    try { nxMotionConcluir(fake); } catch (e) { }
+                }
+            } else if (destino === 'todo') {
+                t.progress = 0;
+                steps.forEach(x => x.completed = false);
+            } else if (destino === 'progress') {
+                t.progress = (feitas !== null && feitas > 0 && feitas < 75) ? feitas : 25;
+            } else if (destino === 'review') {
+                t.progress = (feitas !== null && feitas >= 75 && feitas < 100) ? feitas : 75;
+            } else return false;
+            saveState(true, true);
+            renderAll();
+            const novo = document.querySelector(`#kanban-col-${destino} .nx-kb-card[data-task-id="${CSS.escape(id)}"]`);
+            if (novo) novo.classList.add('nx-kb-novo');
+            if (selectedTaskId === id) { try { populateDrawer(t); } catch (e) { } }
+            return true;
+        }
 
         /* ---------------- Linha do tempo (Gantt leve) ---------------- */
         let tlDiaW = 28;
@@ -5827,12 +5834,11 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             renderSidebarCategories();
             renderSidebarProjects();
             renderBadges();
-            if (appMode === 'tasks') {
+            if (appMode === 'tasks' || nxSplitTarefasAtivo()) {
                 if (currentViewMode === 'list') renderTasksList();
                 else if (currentViewMode === 'kanban') renderKanbanView();
-            } else {
-                renderNotepadTree();
             }
+            if (appMode !== 'tasks') renderNotepadTree();
             try { checkDeadlinesAndNotify(false); } catch (e) { }
             try { atualizarQuadrosDeTarefas(); } catch (e) { }
         }
@@ -6108,7 +6114,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
            e os cards ficavam com o destaque de seleção defasado, apontando para
            uma tarefa diferente da que o painel de detalhes estava exibindo. */
         function renderCurrentView() {
-            if (appMode !== 'tasks') { renderNotepadTree(); return; }
+            if (appMode !== 'tasks') { renderNotepadTree(); if (!nxSplitTarefasAtivo()) return; }
             if (currentViewMode === 'kanban') renderKanbanView();
             else renderTasksList();
         }
@@ -6251,7 +6257,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             ].filter(Boolean).join('');
 
             return `
-                <div onclick="handleTaskCardClick(event, '${t.id}')" class="group notion-card rounded p-2.5 flex flex-col gap-2 cursor-pointer select-none min-w-0 ${selectedTaskId === t.id ? 'selected' : ''} ${isBatchSelected ? 'bg-sky-950/30 border-[#4272c4]/50' : ''}">
+                <div onclick="handleTaskCardClick(event, '${t.id}')" draggable="true" data-task-id="${t.id}" ondragstart="nxKbStart(event, '${t.id}')" ondragend="nxKbEnd(event)" class="nx-kb-card group notion-card rounded p-2.5 flex flex-col gap-2 cursor-pointer select-none min-w-0 ${selectedTaskId === t.id ? 'selected' : ''} ${isBatchSelected ? 'bg-sky-950/30 border-[#4272c4]/50' : ''}">
 
                     <div class="flex items-start gap-2 min-w-0">
                         <button onclick="event.stopPropagation(); toggleTaskCompletion('${t.id}')" class="w-4 h-4 mt-0.5 rounded-full border ${isDone ? 'bg-emerald-600 border-emerald-500 text-white' : 'border-gray-600 hover:border-sky-400'} flex items-center justify-center transition cursor-pointer flex-shrink-0" title="Concluir tarefa">
