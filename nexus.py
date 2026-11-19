@@ -28,7 +28,7 @@ except Exception as e:
     show_native_error_dialog("Erro ao Iniciar - NEXUS", err_msg)
     sys.exit(1)
 
-APP_VERSION = "v0.0.2"
+APP_VERSION = "v0.1.6"
 
 # ---------------------------------------------------------------------------
 # NOTIFICAÇÕES DESKTOP E ÍCONE NA BARRA DE TAREFAS (WINDOWS)
@@ -4758,9 +4758,17 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         function processarRecorrencias() {
             let criou = false;
             const hojeIso = _isoLocal(new Date());
+            const serieDe = x => x.recurSerie || x.id;
             for (const t of state.tasks.slice()) {
                 if (!t || !t.recurrence || !t.recurrence.freq || t.recurNext || (Number(t.progress) || 0) < 100) continue;
+                // Ja existe uma ocorrencia aberta desta serie (ou, em dados antigos sem serie, uma aberta
+                // com o mesmo titulo e a mesma regra)? Liga nela em vez de criar outra copia.
+                const aberta = state.tasks.find(o => o !== t && o.recurrence && (Number(o.progress) || 0) < 100 &&
+                    (serieDe(o) === serieDe(t) || o.recurSerie === t.id ||
+                     (!o.recurSerie && !t.recurSerie && o.title === t.title && o.recurrence.freq === t.recurrence.freq)));
+                if (aberta) { t.recurNext = aberta.id; continue; }
                 const nova = JSON.parse(JSON.stringify(t));
+                nova.recurSerie = serieDe(t);
                 nova.id = 'task-' + Date.now() + '-' + Math.floor(Math.random() * 100000);
                 nova.progress = 0;
                 nova.steps = (nova.steps || []).map((st, i) => ({ ...st, id: 'step-' + Date.now() + '-' + i, completed: false }));
@@ -4772,6 +4780,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 const idx = state.tasks.indexOf(t);
                 state.tasks.splice(idx < 0 ? 0 : idx, 0, nova);
                 criou = true;
+                if (selectedTaskId === t.id) {
+                    selectedTaskId = nova.id;
+                    try { populateDrawer(nova); } catch (e) { }
+                }
                 showToast(`Tarefa recorrente: próxima em ${formatDateBR(nova.dueDate)}`);
             }
             return criou;
@@ -7067,9 +7079,12 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 const rf = (document.getElementById('detailTaskRecFreq') || {}).value || '';
                 if (rf) {
                     const ri = Math.max(1, Math.min(99, parseInt((document.getElementById('detailTaskRecInt') || {}).value, 10) || 1));
+                    const antes = t.recurrence ? t.recurrence.freq + '/' + t.recurrence.interval : '';
                     t.recurrence = { freq: rf, interval: rf === 'weekday' ? 1 : ri };
                     if (!t.dueDate) t.dueDate = _isoLocal(new Date());
-                    delete t.recurNext;
+                    // Antes apagava recurNext em QUALQUER alteracao do painel: mudar a prioridade de uma
+                    // tarefa recorrente ja concluida gerava outra copia a cada mudanca.
+                    if (antes !== t.recurrence.freq + '/' + t.recurrence.interval && (Number(t.progress) || 0) < 100) delete t.recurNext;
                 } else delete t.recurrence;
                 nxSyncRecDrawer(t);
                 saveState(true, true);
